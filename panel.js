@@ -246,6 +246,8 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     if (statusLabel) {
       if (!route.length) {
         statusLabel.textContent = "Status: no waypoints";
+      } else if (status?.pausedForVerification) {
+        statusLabel.textContent = "Status: paused for verification (Heal/Attack stay active)";
       } else if (status?.running) {
         const waypointNumber = (status.currentIndex ?? 0) + 1;
         const distanceLabel =
@@ -1022,10 +1024,14 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
                 <input type="checkbox" id="minibia-bot-talk-enabled" />
                 <span>Enable Auto Reply</span>
               </label>
+              <label class="mb-toggle">
+                <input type="checkbox" id="minibia-bot-talk-npc-replies" />
+                <span>Reply to nearby NPCs (any name)</span>
+              </label>
               <input type="password" id="minibia-bot-talk-api-key" placeholder="Gemini API key" />
               <textarea id="minibia-bot-talk-prompt" placeholder="Reply style prompt"></textarea>
               <div class="mb-small-note" id="minibia-bot-talk-status">Status: idle</div>
-              <div class="mb-small-note">Replies only to the newest unseen message in Default chat.</div>
+              <div class="mb-small-note">Replies to the newest unseen message in Default. NPC replies require the separate opt-in toggle, a nearby NPC, and Gemini.</div>
               <div class="mb-small-note">It will not reply to itself and will not admit it is a bot.</div>
             </div>
           </div>
@@ -1054,6 +1060,16 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
                 <span>Prioritize Monsters</span>
               </label>
               <div class="mb-small-note">When Auto Attack is active, pause waypoints while monsters are in targeting range. Melee Mode is needed to approach distant targets.</div>
+              <label class="mb-toggle">
+                <input type="checkbox" id="minibia-bot-cave-verification-pause" />
+                <span>Pause waypoints on anti-bot notice</span>
+              </label>
+              <label class="mb-field" for="minibia-bot-cave-verification-tick">
+                <span class="mb-field-label">Notice scan tick (ms, 200-5000)</span>
+                <input type="number" id="minibia-bot-cave-verification-tick" min="200" max="5000" step="100" value="500" />
+              </label>
+              <button type="button" class="mb-small-button" id="minibia-bot-cave-resume-verification">Resume Waypoints</button>
+              <div class="mb-small-note">Only waypoint movement pauses. Attack and Heal remain active; Melee Attack can still move the character. Solve the notice manually, then resume. Text-based notices only.</div>
               <div class="mb-actions mb-actions-inline-two">
                 <button type="button" class="mb-small-button" id="minibia-bot-cave-start">Start</button>
                 <button type="button" class="mb-small-button" id="minibia-bot-cave-stop">Stop</button>
@@ -1122,6 +1138,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     const autoAttackHotkeyInput = panel.querySelector("#minibia-bot-auto-attack-hotkey");
     const autoAttackRuneHotkeyInput = panel.querySelector("#minibia-bot-auto-attack-rune-hotkey");
     const talkEnabledInput = panel.querySelector("#minibia-bot-talk-enabled");
+    const talkNpcInput = panel.querySelector("#minibia-bot-talk-npc-replies");
     const talkApiKeyInput = panel.querySelector("#minibia-bot-talk-api-key");
     const talkPromptInput = panel.querySelector("#minibia-bot-talk-prompt");
     const panicGmNameInput = panel.querySelector("#minibia-bot-panic-gm-input");
@@ -1136,6 +1153,9 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     const collapseButton = panel.querySelector("#minibia-bot-collapse");
     const reloadButton = panel.querySelector("#minibia-bot-reload");
     const cavePrioritizeMonstersInput = panel.querySelector("#minibia-bot-cave-prioritize-monsters");
+    const caveVerificationPauseInput = panel.querySelector("#minibia-bot-cave-verification-pause");
+    const caveVerificationTickInput = panel.querySelector("#minibia-bot-cave-verification-tick");
+    const caveResumeVerificationButton = panel.querySelector("#minibia-bot-cave-resume-verification");
     const caveRecordButton = panel.querySelector("#minibia-bot-cave-record");
     const caveRemoveLastButton = panel.querySelector("#minibia-bot-cave-remove-last");
     const caveStartButton = panel.querySelector("#minibia-bot-cave-start");
@@ -1329,6 +1349,30 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
       cavePrioritizeMonstersInput.checked = bot.cave?.config?.prioritizeMonsters === true;
       cavePrioritizeMonstersInput.addEventListener("change", () => {
         bot.cave.updateConfig({ prioritizeMonsters: cavePrioritizeMonstersInput.checked });
+        refreshCaveStatus();
+      });
+    }
+
+    if (caveVerificationPauseInput) {
+      caveVerificationPauseInput.checked = bot.cave?.config?.pauseWaypointsOnVerification === true;
+      caveVerificationPauseInput.addEventListener("change", () => {
+        bot.cave.updateConfig({ pauseWaypointsOnVerification: caveVerificationPauseInput.checked });
+        refreshCaveStatus();
+      });
+    }
+
+    if (caveVerificationTickInput) {
+      caveVerificationTickInput.value = String(bot.cave?.config?.verificationScanTickMs ?? 500);
+      caveVerificationTickInput.addEventListener("change", () => {
+        const verificationScanTickMs = Math.max(200, Math.min(5000, Math.round(Number(caveVerificationTickInput.value) || 500)));
+        caveVerificationTickInput.value = String(verificationScanTickMs);
+        bot.cave.updateConfig({ verificationScanTickMs });
+      });
+    }
+
+    if (caveResumeVerificationButton) {
+      caveResumeVerificationButton.addEventListener("click", () => {
+        bot.cave.resumeAfterVerification();
         refreshCaveStatus();
       });
     }
@@ -1556,6 +1600,14 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
       talkPromptInput.value = bot.talk?.config?.systemPrompt || "";
       talkPromptInput.addEventListener("change", () => {
         bot.talk.updateConfig({ systemPrompt: talkPromptInput.value.trim() });
+      });
+    }
+
+    if (talkNpcInput) {
+      talkNpcInput.checked = bot.talk?.status?.().config?.replyToNpcs === true;
+      talkNpcInput.addEventListener("change", () => {
+        bot.talk.updateConfig({ replyToNpcs: talkNpcInput.checked });
+        refreshTalkStatus();
       });
     }
 
