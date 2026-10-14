@@ -30,8 +30,23 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     lastObservedPosition: null,
     pendingTransitionSource: null,
     pausedForCombat: false,
+    pausedForFloorMove: false,
     lastWaypointWalkDestinationKey: null,
     lastPriorityMonsterSeenAt: 0,
+    pausedForVerification: false,
+    verificationTimerId: null,
+    lastVerificationNotice: null,
+    lastVerificationSeenAt: 0,
+    ignoredVerificationNotice: null,
+    lastRouteRejoinAt: 0,
+    routeRejoinCount: 0,
+    lastRouteRejoinReason: null,
+    needsRouteRejoinCheck: false,
+    lastRoutePathError: null,
+    lastRoutePathErrorAt: 0,
+    lastRouteRecoveryWarningAt: 0,
+    combatPauseStartedAt: 0,
+    combatYieldUntil: 0,
   };
   const minimapOverlayState = {
     timerId: null,
@@ -41,8 +56,13 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     {
       tickMs: 500,
       repathMs: 1500,
+      autoRecoverWaypoints: true,
       waypointTolerance: 0,
       prioritizeMonsters: false, // opt-in: pause waypoint navigation during fights
+      limitChaseToRoute: false, // opt-in: do not chase mobs outside recorded route area
+      maxChaseFromRouteTiles: 6,
+      pauseWaypointsOnVerification: false, // opt-in, never pauses auto-attack or auto-heal
+      verificationScanTickMs: 500,
       enabled: false,
       activePresetName: defaultPresetName,
     },
@@ -50,6 +70,11 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
   );
   config.tickMs = 500;
   config.prioritizeMonsters = config.prioritizeMonsters === true;
+  config.autoRecoverWaypoints = config.autoRecoverWaypoints !== false;
+  config.limitChaseToRoute = config.limitChaseToRoute === true;
+  config.maxChaseFromRouteTiles = Math.max(2, Math.min(20, Math.trunc(Number(config.maxChaseFromRouteTiles) || 6)));
+  config.pauseWaypointsOnVerification = config.pauseWaypointsOnVerification === true;
+  config.verificationScanTickMs = Math.max(200, Math.min(5000, Math.round(Number(config.verificationScanTickMs) || 500)));
 
   function normalizePresetName(value) {
     const normalized = String(value || "").trim().replace(/\s+/g, " ");
@@ -477,6 +502,43 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     });
 
     return bestIndex;
+  }
+
+  // When combat or an external displacement ends far from the recorded path,
+  // re-anchor to the closest same-floor waypoint instead of repeatedly trying
+  // to reach a distant waypoint from a previous section of the route.
+  // Never skip a floor transition or interrupt an active combat / item action.
+  function maybeRecoverRoute(position, now = Date.now()) {
+    if (!config.autoRecoverWaypoints || !position || route.length < 2 ||
+        now - state.lastRouteRejoinAt < 8000) return false;
+    const current = getCurrentWaypoint();
+    if (!current || current.z !== position.z) return false;
+    const currentDistance = getDistance(position, current);
+    const closestIndex = findClosestWaypointIndex(position);
+    const closest = route[closestIndex];
+    const closestDistance = getDistance(position, closest);
+    if (closestIndex === state.currentIndex || !Number.isFinite(closestDistance) ||
+        currentDistance < 8 || currentDistance - closestDistance < 6) return false;
+    // A fresh combat/floor-item return is a valid reason to rejoin immediately.
+    // Otherwise require a period with no movement (e.g. stopped autowalk).
+    if (!state.needsRouteRejoinCheck && now - state.lastProgressAt < 3500) return false;
+    cancelOwnWaypointWalk();
+    const previousIndex = state.currentIndex;
+    state.currentIndex = closestIndex;
+    state.lastRouteRejoinAt = now;
+    state.routeRejoinCount += 1;
+    state.lastRouteRejoinReason = state.needsRouteRejoinCheck ? "returned from activity" : "displaced from waypoint";
+    state.needsRouteRejoinCheck = false;
+    state.lastPathAt = 0;
+    state.lastWaypointWalkDestinationKey = null;
+    bot.log("cave route recovered to nearest same-floor waypoint", {
+      fromIndex: previousIndex + 1,
+      toIndex: closestIndex + 1,
+      currentDistance,
+      closestDistance,
+      reason: state.lastRouteRejoinReason,
+    });
+    return true;
   }
 
   function getTileAt(position) {
@@ -978,24 +1040,48 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
 
   function goToWaypoint(waypoint) {
     const from = bot.getPlayerPosition();
-    if (!from || !waypoint) {
-      return false;
+    const pf = window.gameClient?.world?.pathfinder;
+    if (!from || !waypoint || typeof Position !== "function" ||
+        typeof pf?.findPath !== "function") return false;
+
+    const now = Date.now();
+    const requestedKey = getPositionKey(waypoint);
+    const activeKey = getPositionKey(normalizePosition(pf.__finalDestination));
+    const walkingToRequested = activeKey === requestedKey &&
+      state.lastWaypointWalkDestinationKey === requestedKey &&
+      pf.__isAutoWalking !== false;
+
+    // The previous bot called findPath every 1.5s, even during a healthy
+    // autowalk. Minibia's findPath sends StopWalkPacket for that case.
+    // Keep an active walk unless position has stopped changing for 4s.
+    if (walkingToRequested && now - state.lastProgressAt < 4000) return true;
+    if (walkingToRequested && typeof pf.setPathfindCache === "function") {
+      cancelOwnWaypointWalk(); // cancel ONLY our old stuck autowalk
     }
-
+    state.lastPathAt = now;
     const to = new Position(waypoint.x, waypoint.y, waypoint.z);
-
     try {
-      window.gameClient?.world?.pathfinder?.findPath?.(from, to);
-      state.lastWaypointWalkDestinationKey = getPositionKey(normalizePosition(waypoint));
-      state.lastPathAt = Date.now();
-      bot.log("cave pathing to waypoint", {
-        ...waypoint,
-        index: state.currentIndex + 1,
-        total: route.length,
-      });
+      pf.findPath(from, to);
+      const startedKey = getPositionKey(normalizePosition(pf.__finalDestination));
+      if (startedKey !== requestedKey) {
+        state.lastWaypointWalkDestinationKey = null;
+        state.lastRoutePathError = "pathfinder did not accept waypoint destination";
+        state.lastRoutePathErrorAt = now;
+        if (now - state.lastRouteRecoveryWarningAt >= 8000) {
+          state.lastRouteRecoveryWarningAt = now;
+          bot.log("cave path unavailable; will retry without skipping waypoint", {
+            waypoint, index: state.currentIndex + 1,
+          });
+        }
+        return false;
+      }
+      state.lastRoutePathError = null;
+      state.lastWaypointWalkDestinationKey = requestedKey;
       return true;
     } catch (error) {
-      bot.log("cave pathing failed", { ...waypoint, error: error?.message || error });
+      state.lastRoutePathError = String(error?.message || error);
+      state.lastRoutePathErrorAt = now;
+      bot.log("cave pathing failed", { ...waypoint, error: state.lastRoutePathError });
       return false;
     }
   }
@@ -1370,6 +1456,88 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     return true;
   }
 
+  // The floor-item mover may temporarily own movement to a visible item.
+  // Never cancel its path; only stop a Cave Bot-owned waypoint route.
+  function setFloorMovePause(paused) {
+    const next=paused===true;
+    if (state.pausedForFloorMove===next) return false;
+    state.pausedForFloorMove=next;
+    if (next) cancelOwnWaypointWalk();
+    else {
+      state.lastPathAt=0; // revisit or rejoin after the item action
+      state.needsRouteRejoinCheck=true;
+    }
+    return true;
+  }
+
+  // Human-in-the-loop warning detection. This deliberately never clicks,
+  // classifies, or solves a verification challenge.
+  const verificationNoticePattern = /(?:anti[\s-]*bot(?:[\s-]*(?:test|check|verification|challenge))?|verificaci[oó]n[\s-]*anti[\s-]*bot|(?:test|prueba)[\s-]*anti[\s-]*bot|toca el objeto que se ilumin[oó]|touch the (?:object|item) that (?:lit up|was illuminated))/i;
+  const verificationTriggerPattern = /(?:anti[\s-]*bot(?:[\s-]*(?:test|check|verification|challenge))?|verificaci[oó]n[\s-]*anti[\s-]*bot|(?:test|prueba)[\s-]*anti[\s-]*bot|toca el objeto que se ilumin[oó]|touch the (?:object|item) that (?:lit up|was illuminated))/i;
+
+  function findVisibleVerificationNotice() {
+    if (!document.body || typeof document.createTreeWalker !== "function") return null;
+    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+    let visited = 0;
+    let textNode;
+    while ((textNode = walker.nextNode()) && visited++ < 4000) {
+      const value = String(textNode.textContent || "").trim();
+      if (!value || value.length > 350 || !verificationNoticePattern.test(value)) continue;
+      const parent = textNode.parentElement;
+      if (!parent || parent.closest("#minibia-bot-panel, script, style, noscript, template")) continue;
+      if (parent.closest('[aria-hidden="true"], [hidden]')) continue;
+      if (typeof parent.getClientRects === "function" && parent.getClientRects().length === 0) continue;
+      if (verificationTriggerPattern.test(value)) return value.slice(0, 160);
+    }
+    return null;
+  }
+
+  function scanVerificationNotice() {
+    if (!config.pauseWaypointsOnVerification) return;
+    try {
+      const notice = findVisibleVerificationNotice();
+      if (!notice) {
+        state.ignoredVerificationNotice = null;
+        return;
+      }
+      if (notice === state.ignoredVerificationNotice) return;
+      state.lastVerificationSeenAt = Date.now();
+      state.lastVerificationNotice = notice;
+      if (state.pausedForVerification) return;
+      state.pausedForVerification = true;
+      cancelOwnWaypointWalk();
+      bot.playAlarm?.(); // one alert per verification, if browser audio was unlocked
+      bot.log("cave paused for verification notice", { notice });
+    } catch (error) {
+      bot.log("verification notice check failed", error?.message || error);
+    }
+  }
+
+  function restartVerificationScanner() {
+    if (state.verificationTimerId != null) {
+      window.clearInterval(state.verificationTimerId);
+      state.verificationTimerId = null;
+    }
+    if (!config.pauseWaypointsOnVerification) return;
+    scanVerificationNotice();
+    state.verificationTimerId = window.setInterval(scanVerificationNotice, config.verificationScanTickMs);
+  }
+
+  // Only the operator can resume waypoint movement after inspecting the test.
+  // Attack and Heal were never stopped.
+  function resumeAfterVerification() {
+    // Explicit operator decision: a chat notice can remain in the message
+    // history after the challenge has ended. Don't let that old text trap the
+    // route permanently; a different/new notice can still pause it again.
+    state.ignoredVerificationNotice = findVisibleVerificationNotice();
+    state.pausedForVerification = false;
+    state.lastVerificationNotice = null;
+    state.lastPathAt = 0;
+    state.needsRouteRejoinCheck = true;
+    bot.log("waypoint navigation resumed by operator");
+    return true;
+  }
+
   function scheduleNextTick() {
     if (!state.running) return;
 
@@ -1392,6 +1560,29 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
       const position = normalizePosition(bot.getPlayerPosition());
       const positionKey = getPositionKey(position);
       const now = Date.now();
+      if (positionKey && positionKey !== state.lastPositionKey) {
+        state.lastPositionKey = positionKey;
+        state.lastProgressAt = now;
+      }
+
+      // Pause *only* cave navigation. Auto Attack and Auto Heal remain active.
+      if (config.pauseWaypointsOnVerification && state.pausedForVerification) {
+        cancelOwnWaypointWalk();
+        return;
+      }
+
+      if (state.pausedForFloorMove) {
+        // A stale pause can remain if floor-item navigation was interrupted.
+        // Never steal an active floor-item path.
+        const itemStatus = bot.floorMove?.status?.();
+        if (itemStatus?.running && itemStatus.navigatingTo) {
+          cancelOwnWaypointWalk();
+          return;
+        }
+        setFloorMovePause(false);
+        state.needsRouteRejoinCheck = true;
+        bot.log("cave recovered stale floor-item navigation pause");
+      }
       const attackStatus = bot.attack?.status?.() || null;
       const priorityEnabled = config.prioritizeMonsters === true &&
         !!attackStatus?.running && !!attackStatus?.config?.enabled;
@@ -1401,14 +1592,34 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
       // Preserve the original 60-second behavior when this is disabled.
       // With priority enabled, a short grace period prevents waypoint movement
       // between kills, but a stale client target cannot freeze the route.
+      const noTarget = !attackStatus?.currentTarget && !attackStatus?.combatActive;
+      const targetPosition = normalizePosition(attackStatus?.currentTarget?.position);
+      const targetDistance = getDistance(position, targetPosition);
+      const staleCombat = priorityEnabled && state.pausedForCombat &&
+        now - state.combatPauseStartedAt > 15000 &&
+        now - state.lastProgressAt > 12000 &&
+        (noTarget || (attackStatus?.config?.meleeMode === true && targetDistance > 2));
+      if (staleCombat && now >= state.combatYieldUntil) {
+        state.combatYieldUntil = now + 5000;
+        bot.log("cave priority yielded temporarily after stalled chase", {
+          targetDistance,
+          hasTarget: !noTarget,
+        });
+      }
+      // Do not override actual nearby engaged combat. If no valid target or
+      // melee chase cannot move for a long period, allow Cave to leave the
+      // unreachable spot briefly rather than pausing forever.
+      const yielded = now < state.combatYieldUntil &&
+        (noTarget || (attackStatus?.config?.meleeMode === true && targetDistance > 2));
       const shouldPauseForCombat = priorityEnabled
-        ? monstersInRange || (state.pausedForCombat && now - state.lastPriorityMonsterSeenAt < 900)
+        ? !yielded && (monstersInRange || (state.pausedForCombat && now - state.lastPriorityMonsterSeenAt < 900))
         : !!attackStatus?.combatActive &&
           Number(attackStatus?.combatDurationMs || 0) < 60000;
 
       if (shouldPauseForCombat) {
         if (!state.pausedForCombat) {
           state.pausedForCombat = true;
+          state.combatPauseStartedAt = now;
           if (priorityEnabled) cancelOwnWaypointWalk();
           bot.log("cave paused for auto attack", {
             combatDurationMs: Number(attackStatus?.combatDurationMs || 0),
@@ -1422,17 +1633,16 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
 
       if (state.pausedForCombat) {
         state.pausedForCombat = false;
-        state.lastPathAt = 0; // resume the same waypoint immediately
+        state.combatPauseStartedAt = 0;
+        state.needsRouteRejoinCheck = true;
+        state.lastPathAt = 0; // resume or rejoin immediately
         bot.log("cave resumed after auto attack", {
           combatDurationMs: Number(attackStatus?.combatDurationMs || 0),
           targetCount: Number(attackStatus?.targetCount || 0),
         });
       }
 
-      if (positionKey && positionKey !== state.lastPositionKey) {
-        state.lastPositionKey = positionKey;
-        state.lastProgressAt = now;
-      }
+      maybeRecoverRoute(position, now);
 
       let waypoint = getCurrentWaypoint();
       if (!waypoint) {
@@ -1519,6 +1729,11 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     state.pausedForCombat = false;
     state.lastWaypointWalkDestinationKey = null;
     state.lastPriorityMonsterSeenAt = 0;
+    state.needsRouteRejoinCheck = false;
+    state.lastRouteRejoinAt = 0;
+    state.lastRoutePathError = null;
+    state.combatYieldUntil = 0;
+    state.combatPauseStartedAt = 0;
     bot.log("cave bot started", {
       waypoints: route.length,
       currentIndex: state.currentIndex + 1,
@@ -1543,6 +1758,9 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
       persistConfig();
     }
     state.pausedForCombat = false;
+    state.pausedForFloorMove = false;
+    state.needsRouteRejoinCheck = false;
+    state.combatPauseStartedAt = 0;
     bot.log("cave bot stopped");
     return true;
   }
@@ -1644,22 +1862,46 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
       direction: state.direction,
       currentWaypoint: cloneValue(waypoint),
       distanceToWaypoint: getDistanceToWaypoint(position, waypoint),
+      nearestWaypointIndex: route.length ? findClosestWaypointIndex(position) : null,
+      distanceToNearestWaypoint: position && route.length ?
+        getDistanceToWaypoint(position, route[findClosestWaypointIndex(position)]) : null,
+      routeRejoinCount: state.routeRejoinCount,
+      lastRouteRejoinReason: state.lastRouteRejoinReason,
+      lastRoutePathError: state.lastRoutePathError,
+      lastRoutePathErrorAt: state.lastRoutePathErrorAt,
+      priorityYieldUntil: state.combatYieldUntil,
       lastPathAt: state.lastPathAt,
       lastProgressAt: state.lastProgressAt,
       pendingTransitionSource: cloneValue(state.pendingTransitionSource),
       pausedForCombat: state.pausedForCombat,
+      pausedForFloorMove: state.pausedForFloorMove,
+      pausedForVerification: state.pausedForVerification && config.pauseWaypointsOnVerification,
+      lastVerificationNotice: state.lastVerificationNotice,
+      lastVerificationSeenAt: state.lastVerificationSeenAt,
     };
   }
 
   function updateConfig(nextConfig = {}) {
     Object.assign(config, nextConfig);
     config.prioritizeMonsters = config.prioritizeMonsters === true;
+    config.autoRecoverWaypoints = config.autoRecoverWaypoints !== false;
+    config.limitChaseToRoute = config.limitChaseToRoute === true;
+    config.maxChaseFromRouteTiles = Math.max(2, Math.min(20, Math.trunc(Number(config.maxChaseFromRouteTiles) || 6)));
+    config.pauseWaypointsOnVerification = config.pauseWaypointsOnVerification === true;
+    config.verificationScanTickMs = Math.max(200, Math.min(5000, Math.round(Number(config.verificationScanTickMs) || 500)));
     config.tickMs = 500;
+    if (!config.pauseWaypointsOnVerification) state.pausedForVerification = false;
+    restartVerificationScanner();
     persistConfig();
     bot.log("cave config updated", { ...config });
     return { ...config };
   }
 
+  restartVerificationScanner();
+  bot.addCleanup(() => {
+    if (state.verificationTimerId != null) window.clearInterval(state.verificationTimerId);
+    state.verificationTimerId = null;
+  });
   startObserver();
   bot.addCleanup(stopObserver);
   startMinimapOverlay();
@@ -1674,6 +1916,9 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     stop,
     status,
     updateConfig,
+    resumeAfterVerification,
+    setFloorMovePause,
+    scanVerificationNotice,
     config,
     getRoute,
     getTransitions,

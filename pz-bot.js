@@ -2805,6 +2805,9 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
     lastFollowDistance: Number.POSITIVE_INFINITY,
     lastFollowProgressAt: 0,
     lastFollowStallAt: 0,
+    // Track actual player movement, not just shrinking distance to a moving mob.
+    lastChasePlayerPositionKey: null,
+    lastChasePlayerMovedAt: 0,
     skippedTargetIds: new Map(),
   };
 
@@ -2895,6 +2898,53 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
     );
   }
 
+  // Optional chase leash: the area is defined by waypoints on the current
+  // floor, not a radius around the player. Disabled outside an active Cave Bot.
+  // Never changes the manual/non-melee targeting behavior.
+  function getRouteLeash() {
+    const cave = bot.cave;
+    if (!cave?.status || !cave?.getRoute || cave.config?.limitChaseToRoute !== true) return null;
+    if (!cave.status().running) return null;
+    return {
+      points: cave.getRoute().map(normalizePosition).filter(Boolean),
+      radius: Math.max(2, Math.min(20, Math.trunc(Number(cave.config.maxChaseFromRouteTiles) || 6))),
+    };
+  }
+
+  function routeDistance(position, leash) {
+    if (!position || !leash) return Number.POSITIVE_INFINITY;
+    let best = Number.POSITIVE_INFINITY;
+    for (const waypoint of leash.points) {
+      best = Math.min(best, getTileDistance(position, waypoint));
+    }
+    return best;
+  }
+
+  function isInsideRoute(position, leash) {
+    return !leash || routeDistance(position, leash) <= leash.radius;
+  }
+
+  function enforceRouteLeash(now = Date.now()) {
+    if (!config.meleeMode) return false;
+    const leash = getRouteLeash();
+    if (!leash) return false;
+    const playerPosition = normalizePosition(bot.getPlayerPosition());
+    const target = getCurrentTarget() || getEngagedTarget();
+    const targetPosition = normalizePosition(target?.getPosition?.() || target?.__position);
+    const playerOut = !isInsideRoute(playerPosition, leash);
+    const targetOut = !!target && !isInsideRoute(targetPosition, leash);
+    if (!playerOut && !targetOut) return false;
+
+    // Cancel ONLY an Auto Attack-owned walk; Cave Bot will reclaim waypoints.
+    cancelPreviousMeleeChase();
+    if (target) {
+      skipTarget(target, "outside route chase limit", now, 1500);
+    } else if (state.engagedTargetId != null) {
+      clearEngagedTarget();
+    }
+    return true;
+  }
+
   function isSameCreature(left, right) {
     if (!left || !right) {
       return false;
@@ -2941,6 +2991,8 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
     state.lastFollowDistance = Number.POSITIVE_INFINITY;
     state.lastFollowProgressAt = 0;
     state.lastFollowStallAt = 0;
+    state.lastChasePlayerPositionKey = null;
+    state.lastChasePlayerMovedAt = 0;
   }
 
   function clearEngagedTarget() {
@@ -3134,8 +3186,13 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
     pruneSkippedTargets(now);
 
     const playerPosition = normalizePosition(bot.getPlayerPosition());
+    const leash = config.meleeMode ? getRouteLeash() : null;
+    if (leash && !isInsideRoute(playerPosition, leash)) return [];
     return getNearbyMonsters()
       .filter((monster) => !isTargetSkipped(monster, now))
+      .filter((monster) => !leash || isInsideRoute(
+        normalizePosition(monster?.getPosition?.() || monster?.__position), leash
+      ))
       .sort((left, right) => {
         const leftDistance = getTileDistance(playerPosition, normalizePosition(left?.getPosition?.() || left?.__position));
         const rightDistance = getTileDistance(playerPosition, normalizePosition(right?.getPosition?.() || right?.__position));
@@ -3325,6 +3382,9 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
       if (config.avoidFloorChangesOnChase && isFloorTransitionTile(tile)) {
         continue;
       }
+      // Do not start a new melee walk whose destination escapes the route.
+      const leash = getRouteLeash();
+      if (leash && !isInsideRoute(candidatePosition, leash)) continue;
 
       if (candidatePosition.x === playerPosition.x && candidatePosition.y === playerPosition.y) {
         return candidatePosition;
@@ -3332,11 +3392,13 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
 
       try {
         const path = pathfinder.search(startTile, tile);
-        if (config.avoidFloorChangesOnChase
+        const safeFloor = config.avoidFloorChangesOnChase
           ? isSafeMeleePath(path)
-          : Array.isArray(path) && path.length > 0) {
-          return candidatePosition;
-        }
+          : Array.isArray(path) && path.length > 0;
+        const safeLeash = !leash || (Array.isArray(path) && path.every((node) =>
+          isInsideRoute(normalizePosition(node?.__position), leash)
+        ));
+        if (safeFloor && safeLeash) return candidatePosition;
       } catch (error) {
         bot.log("auto attack reachability check failed", {
           ...candidatePosition,
@@ -3373,42 +3435,65 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
     const targetPosition = normalizePosition(target.getPosition?.() || target.__position);
     if (!playerPosition || !targetPosition || playerPosition.z !== targetPosition.z) return false;
 
-    const giveUpDelayMs = Math.max(5000, (Number(config.tickMs) || 0) * 10);
+    // A moving monster can stay the same distance away for many seconds even
+    // while the character is walking successfully. Measure the PLAYER's tile
+    // progress to avoid falsely blacklisting that target after five seconds.
+    const playerKey = getPositionKey(playerPosition);
+    if (state.lastFollowTargetId !== target.id) {
+      resetFollowProgress();
+      state.lastFollowTargetId = target.id;
+    }
+    if (state.lastChasePlayerPositionKey !== playerKey) {
+      state.lastChasePlayerPositionKey = playerKey;
+      state.lastChasePlayerMovedAt = now;
+      state.lastFollowStallAt = 0;
+    }
+    const idleForMs = Math.max(0, now - state.lastChasePlayerMovedAt);
+    const giveUpDelayMs = Math.max(12000, (Number(config.tickMs) || 0) * 24);
+
     if (isAdjacentTile(playerPosition, targetPosition)) {
       state.lastChaseDestinationKey = null;
-      resetFollowProgress();
+      state.lastFollowStallAt = 0;
+      // Keep movement progress information so a moving target is tracked
+      // without allocating another target or toggling follow mode.
       return false;
     }
 
     const adjacentPosition = findReachableAdjacentPosition(targetPosition, playerPosition);
     if (!adjacentPosition) {
       if (!state.lastFollowStallAt) state.lastFollowStallAt = now;
-      else if (now - state.lastFollowStallAt > giveUpDelayMs)
-        return skipTarget(target, "no reachable adjacent tile", now);
+      // Only give up after a sustained lack of player movement AND no valid
+      // path. A brief occupied tile is common while fighting in a cave.
+      if (idleForMs >= giveUpDelayMs && now - state.lastFollowStallAt >= giveUpDelayMs)
+        return skipTarget(target, "no reachable adjacent tile", now, 1500);
       return false;
     }
 
     const distance = getTileDistance(playerPosition, targetPosition);
-    if (state.lastFollowTargetId !== target.id || distance < state.lastFollowDistance) {
-      state.lastFollowTargetId = target.id;
-      state.lastFollowDistance = distance;
-      state.lastFollowProgressAt = now;
-      state.lastFollowStallAt = 0;
-    } else if (!state.lastFollowStallAt) {
-      state.lastFollowStallAt = now;
-    } else if (now - state.lastFollowStallAt > giveUpDelayMs) {
-      return skipTarget(target, "path made no progress", now);
+    state.lastFollowDistance = distance;
+    state.lastFollowProgressAt = state.lastChasePlayerMovedAt;
+    if (idleForMs >= giveUpDelayMs) {
+      return skipTarget(target, "chase could not progress", now, 1500);
     }
 
     const destinationKey = getPositionKey(adjacentPosition);
-    // Avoid constantly cancelling/re-sending autowalk. Repath only for a
-    // changed destination or at a measured interval if still distant.
-    if (destinationKey === state.lastChaseDestinationKey && now - state.lastChaseAt < 1200)
-      return false;
-
     const pathfinder = window.gameClient?.world?.pathfinder;
     if (!pathfinder || typeof pathfinder.findPath !== "function" || typeof Position !== "function")
       return false;
+
+    // If Minibia completed/cancelled the autowalk, __finalDestination becomes
+    // null. A stale lastChaseDestinationKey must not suppress reacquisition.
+    const activeDestinationKey = getPositionKey(normalizePosition(pathfinder.__finalDestination));
+    const ownPathActive = activeDestinationKey === state.lastChaseDestinationKey &&
+      activeDestinationKey === destinationKey && pathfinder.__isAutoWalking !== false;
+    const sameDestination = destinationKey === state.lastChaseDestinationKey;
+    const elapsed = now - state.lastChaseAt;
+
+    // Let a healthy walk continue; only repath after an actual stall, a
+    // cancelled/completed autowalk or a changed monster position.
+    if (sameDestination && ownPathActive && idleForMs < 2200) return false;
+    if (sameDestination && elapsed < (ownPathActive ? 2000 : 900)) return false;
+    if (!sameDestination && elapsed < 450) return false;
 
     // Server-side mapclick can choose a different route from the local A*.
     // Fail closed instead of sending an unvalidated chase across floors.
@@ -3420,6 +3505,11 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
     }
 
     try {
+      // Only cancel paths that this module previously requested. A stalled
+      // walk needs a clean retry, but waypoint/manual/item paths are not ours.
+      if (ownPathActive && idleForMs >= 2200) {
+        cancelPreviousMeleeChase();
+      }
       pathfinder.findPath(
         new Position(playerPosition.x, playerPosition.y, playerPosition.z),
         new Position(adjacentPosition.x, adjacentPosition.y, adjacentPosition.z)
@@ -3521,6 +3611,7 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
     if (!config.enabled) return false;
 
     const now = Date.now();
+    if (enforceRouteLeash(now)) return true;
     if (resetTargetIfTooFar()) return true;
 
     syncCombatState(now);
@@ -3704,12 +3795,23 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     lastObservedPosition: null,
     pendingTransitionSource: null,
     pausedForCombat: false,
+    pausedForFloorMove: false,
     lastWaypointWalkDestinationKey: null,
     lastPriorityMonsterSeenAt: 0,
     pausedForVerification: false,
     verificationTimerId: null,
     lastVerificationNotice: null,
     lastVerificationSeenAt: 0,
+    ignoredVerificationNotice: null,
+    lastRouteRejoinAt: 0,
+    routeRejoinCount: 0,
+    lastRouteRejoinReason: null,
+    needsRouteRejoinCheck: false,
+    lastRoutePathError: null,
+    lastRoutePathErrorAt: 0,
+    lastRouteRecoveryWarningAt: 0,
+    combatPauseStartedAt: 0,
+    combatYieldUntil: 0,
   };
   const minimapOverlayState = {
     timerId: null,
@@ -3719,8 +3821,11 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     {
       tickMs: 500,
       repathMs: 1500,
+      autoRecoverWaypoints: true,
       waypointTolerance: 0,
       prioritizeMonsters: false, // opt-in: pause waypoint navigation during fights
+      limitChaseToRoute: false, // opt-in: do not chase mobs outside recorded route area
+      maxChaseFromRouteTiles: 6,
       pauseWaypointsOnVerification: false, // opt-in, never pauses auto-attack or auto-heal
       verificationScanTickMs: 500,
       enabled: false,
@@ -3730,6 +3835,9 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
   );
   config.tickMs = 500;
   config.prioritizeMonsters = config.prioritizeMonsters === true;
+  config.autoRecoverWaypoints = config.autoRecoverWaypoints !== false;
+  config.limitChaseToRoute = config.limitChaseToRoute === true;
+  config.maxChaseFromRouteTiles = Math.max(2, Math.min(20, Math.trunc(Number(config.maxChaseFromRouteTiles) || 6)));
   config.pauseWaypointsOnVerification = config.pauseWaypointsOnVerification === true;
   config.verificationScanTickMs = Math.max(200, Math.min(5000, Math.round(Number(config.verificationScanTickMs) || 500)));
 
@@ -4159,6 +4267,43 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     });
 
     return bestIndex;
+  }
+
+  // When combat or an external displacement ends far from the recorded path,
+  // re-anchor to the closest same-floor waypoint instead of repeatedly trying
+  // to reach a distant waypoint from a previous section of the route.
+  // Never skip a floor transition or interrupt an active combat / item action.
+  function maybeRecoverRoute(position, now = Date.now()) {
+    if (!config.autoRecoverWaypoints || !position || route.length < 2 ||
+        now - state.lastRouteRejoinAt < 8000) return false;
+    const current = getCurrentWaypoint();
+    if (!current || current.z !== position.z) return false;
+    const currentDistance = getDistance(position, current);
+    const closestIndex = findClosestWaypointIndex(position);
+    const closest = route[closestIndex];
+    const closestDistance = getDistance(position, closest);
+    if (closestIndex === state.currentIndex || !Number.isFinite(closestDistance) ||
+        currentDistance < 8 || currentDistance - closestDistance < 6) return false;
+    // A fresh combat/floor-item return is a valid reason to rejoin immediately.
+    // Otherwise require a period with no movement (e.g. stopped autowalk).
+    if (!state.needsRouteRejoinCheck && now - state.lastProgressAt < 3500) return false;
+    cancelOwnWaypointWalk();
+    const previousIndex = state.currentIndex;
+    state.currentIndex = closestIndex;
+    state.lastRouteRejoinAt = now;
+    state.routeRejoinCount += 1;
+    state.lastRouteRejoinReason = state.needsRouteRejoinCheck ? "returned from activity" : "displaced from waypoint";
+    state.needsRouteRejoinCheck = false;
+    state.lastPathAt = 0;
+    state.lastWaypointWalkDestinationKey = null;
+    bot.log("cave route recovered to nearest same-floor waypoint", {
+      fromIndex: previousIndex + 1,
+      toIndex: closestIndex + 1,
+      currentDistance,
+      closestDistance,
+      reason: state.lastRouteRejoinReason,
+    });
+    return true;
   }
 
   function getTileAt(position) {
@@ -4660,24 +4805,48 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
 
   function goToWaypoint(waypoint) {
     const from = bot.getPlayerPosition();
-    if (!from || !waypoint) {
-      return false;
+    const pf = window.gameClient?.world?.pathfinder;
+    if (!from || !waypoint || typeof Position !== "function" ||
+        typeof pf?.findPath !== "function") return false;
+
+    const now = Date.now();
+    const requestedKey = getPositionKey(waypoint);
+    const activeKey = getPositionKey(normalizePosition(pf.__finalDestination));
+    const walkingToRequested = activeKey === requestedKey &&
+      state.lastWaypointWalkDestinationKey === requestedKey &&
+      pf.__isAutoWalking !== false;
+
+    // The previous bot called findPath every 1.5s, even during a healthy
+    // autowalk. Minibia's findPath sends StopWalkPacket for that case.
+    // Keep an active walk unless position has stopped changing for 4s.
+    if (walkingToRequested && now - state.lastProgressAt < 4000) return true;
+    if (walkingToRequested && typeof pf.setPathfindCache === "function") {
+      cancelOwnWaypointWalk(); // cancel ONLY our old stuck autowalk
     }
-
+    state.lastPathAt = now;
     const to = new Position(waypoint.x, waypoint.y, waypoint.z);
-
     try {
-      window.gameClient?.world?.pathfinder?.findPath?.(from, to);
-      state.lastWaypointWalkDestinationKey = getPositionKey(normalizePosition(waypoint));
-      state.lastPathAt = Date.now();
-      bot.log("cave pathing to waypoint", {
-        ...waypoint,
-        index: state.currentIndex + 1,
-        total: route.length,
-      });
+      pf.findPath(from, to);
+      const startedKey = getPositionKey(normalizePosition(pf.__finalDestination));
+      if (startedKey !== requestedKey) {
+        state.lastWaypointWalkDestinationKey = null;
+        state.lastRoutePathError = "pathfinder did not accept waypoint destination";
+        state.lastRoutePathErrorAt = now;
+        if (now - state.lastRouteRecoveryWarningAt >= 8000) {
+          state.lastRouteRecoveryWarningAt = now;
+          bot.log("cave path unavailable; will retry without skipping waypoint", {
+            waypoint, index: state.currentIndex + 1,
+          });
+        }
+        return false;
+      }
+      state.lastRoutePathError = null;
+      state.lastWaypointWalkDestinationKey = requestedKey;
       return true;
     } catch (error) {
-      bot.log("cave pathing failed", { ...waypoint, error: error?.message || error });
+      state.lastRoutePathError = String(error?.message || error);
+      state.lastRoutePathErrorAt = now;
+      bot.log("cave pathing failed", { ...waypoint, error: state.lastRoutePathError });
       return false;
     }
   }
@@ -5052,6 +5221,20 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     return true;
   }
 
+  // The floor-item mover may temporarily own movement to a visible item.
+  // Never cancel its path; only stop a Cave Bot-owned waypoint route.
+  function setFloorMovePause(paused) {
+    const next=paused===true;
+    if (state.pausedForFloorMove===next) return false;
+    state.pausedForFloorMove=next;
+    if (next) cancelOwnWaypointWalk();
+    else {
+      state.lastPathAt=0; // revisit or rejoin after the item action
+      state.needsRouteRejoinCheck=true;
+    }
+    return true;
+  }
+
   // Human-in-the-loop warning detection. This deliberately never clicks,
   // classifies, or solves a verification challenge.
   const verificationNoticePattern = /(?:anti[\s-]*bot(?:[\s-]*(?:test|check|verification|challenge))?|verificaci[oó]n[\s-]*anti[\s-]*bot|(?:test|prueba)[\s-]*anti[\s-]*bot|toca el objeto que se ilumin[oó]|touch the (?:object|item) that (?:lit up|was illuminated))/i;
@@ -5078,7 +5261,11 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     if (!config.pauseWaypointsOnVerification) return;
     try {
       const notice = findVisibleVerificationNotice();
-      if (!notice) return;
+      if (!notice) {
+        state.ignoredVerificationNotice = null;
+        return;
+      }
+      if (notice === state.ignoredVerificationNotice) return;
       state.lastVerificationSeenAt = Date.now();
       state.lastVerificationNotice = notice;
       if (state.pausedForVerification) return;
@@ -5104,13 +5291,14 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
   // Only the operator can resume waypoint movement after inspecting the test.
   // Attack and Heal were never stopped.
   function resumeAfterVerification() {
-    if (config.pauseWaypointsOnVerification && findVisibleVerificationNotice()) {
-      bot.log("verification notice still visible; waypoints remain paused");
-      return false;
-    }
+    // Explicit operator decision: a chat notice can remain in the message
+    // history after the challenge has ended. Don't let that old text trap the
+    // route permanently; a different/new notice can still pause it again.
+    state.ignoredVerificationNotice = findVisibleVerificationNotice();
     state.pausedForVerification = false;
     state.lastVerificationNotice = null;
     state.lastPathAt = 0;
+    state.needsRouteRejoinCheck = true;
     bot.log("waypoint navigation resumed by operator");
     return true;
   }
@@ -5134,15 +5322,32 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
         return;
       }
 
+      const position = normalizePosition(bot.getPlayerPosition());
+      const positionKey = getPositionKey(position);
+      const now = Date.now();
+      if (positionKey && positionKey !== state.lastPositionKey) {
+        state.lastPositionKey = positionKey;
+        state.lastProgressAt = now;
+      }
+
       // Pause *only* cave navigation. Auto Attack and Auto Heal remain active.
       if (config.pauseWaypointsOnVerification && state.pausedForVerification) {
         cancelOwnWaypointWalk();
         return;
       }
 
-      const position = normalizePosition(bot.getPlayerPosition());
-      const positionKey = getPositionKey(position);
-      const now = Date.now();
+      if (state.pausedForFloorMove) {
+        // A stale pause can remain if floor-item navigation was interrupted.
+        // Never steal an active floor-item path.
+        const itemStatus = bot.floorMove?.status?.();
+        if (itemStatus?.running && itemStatus.navigatingTo) {
+          cancelOwnWaypointWalk();
+          return;
+        }
+        setFloorMovePause(false);
+        state.needsRouteRejoinCheck = true;
+        bot.log("cave recovered stale floor-item navigation pause");
+      }
       const attackStatus = bot.attack?.status?.() || null;
       const priorityEnabled = config.prioritizeMonsters === true &&
         !!attackStatus?.running && !!attackStatus?.config?.enabled;
@@ -5152,14 +5357,34 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
       // Preserve the original 60-second behavior when this is disabled.
       // With priority enabled, a short grace period prevents waypoint movement
       // between kills, but a stale client target cannot freeze the route.
+      const noTarget = !attackStatus?.currentTarget && !attackStatus?.combatActive;
+      const targetPosition = normalizePosition(attackStatus?.currentTarget?.position);
+      const targetDistance = getDistance(position, targetPosition);
+      const staleCombat = priorityEnabled && state.pausedForCombat &&
+        now - state.combatPauseStartedAt > 15000 &&
+        now - state.lastProgressAt > 12000 &&
+        (noTarget || (attackStatus?.config?.meleeMode === true && targetDistance > 2));
+      if (staleCombat && now >= state.combatYieldUntil) {
+        state.combatYieldUntil = now + 5000;
+        bot.log("cave priority yielded temporarily after stalled chase", {
+          targetDistance,
+          hasTarget: !noTarget,
+        });
+      }
+      // Do not override actual nearby engaged combat. If no valid target or
+      // melee chase cannot move for a long period, allow Cave to leave the
+      // unreachable spot briefly rather than pausing forever.
+      const yielded = now < state.combatYieldUntil &&
+        (noTarget || (attackStatus?.config?.meleeMode === true && targetDistance > 2));
       const shouldPauseForCombat = priorityEnabled
-        ? monstersInRange || (state.pausedForCombat && now - state.lastPriorityMonsterSeenAt < 900)
+        ? !yielded && (monstersInRange || (state.pausedForCombat && now - state.lastPriorityMonsterSeenAt < 900))
         : !!attackStatus?.combatActive &&
           Number(attackStatus?.combatDurationMs || 0) < 60000;
 
       if (shouldPauseForCombat) {
         if (!state.pausedForCombat) {
           state.pausedForCombat = true;
+          state.combatPauseStartedAt = now;
           if (priorityEnabled) cancelOwnWaypointWalk();
           bot.log("cave paused for auto attack", {
             combatDurationMs: Number(attackStatus?.combatDurationMs || 0),
@@ -5173,17 +5398,16 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
 
       if (state.pausedForCombat) {
         state.pausedForCombat = false;
-        state.lastPathAt = 0; // resume the same waypoint immediately
+        state.combatPauseStartedAt = 0;
+        state.needsRouteRejoinCheck = true;
+        state.lastPathAt = 0; // resume or rejoin immediately
         bot.log("cave resumed after auto attack", {
           combatDurationMs: Number(attackStatus?.combatDurationMs || 0),
           targetCount: Number(attackStatus?.targetCount || 0),
         });
       }
 
-      if (positionKey && positionKey !== state.lastPositionKey) {
-        state.lastPositionKey = positionKey;
-        state.lastProgressAt = now;
-      }
+      maybeRecoverRoute(position, now);
 
       let waypoint = getCurrentWaypoint();
       if (!waypoint) {
@@ -5270,6 +5494,11 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     state.pausedForCombat = false;
     state.lastWaypointWalkDestinationKey = null;
     state.lastPriorityMonsterSeenAt = 0;
+    state.needsRouteRejoinCheck = false;
+    state.lastRouteRejoinAt = 0;
+    state.lastRoutePathError = null;
+    state.combatYieldUntil = 0;
+    state.combatPauseStartedAt = 0;
     bot.log("cave bot started", {
       waypoints: route.length,
       currentIndex: state.currentIndex + 1,
@@ -5294,6 +5523,9 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
       persistConfig();
     }
     state.pausedForCombat = false;
+    state.pausedForFloorMove = false;
+    state.needsRouteRejoinCheck = false;
+    state.combatPauseStartedAt = 0;
     bot.log("cave bot stopped");
     return true;
   }
@@ -5395,10 +5627,19 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
       direction: state.direction,
       currentWaypoint: cloneValue(waypoint),
       distanceToWaypoint: getDistanceToWaypoint(position, waypoint),
+      nearestWaypointIndex: route.length ? findClosestWaypointIndex(position) : null,
+      distanceToNearestWaypoint: position && route.length ?
+        getDistanceToWaypoint(position, route[findClosestWaypointIndex(position)]) : null,
+      routeRejoinCount: state.routeRejoinCount,
+      lastRouteRejoinReason: state.lastRouteRejoinReason,
+      lastRoutePathError: state.lastRoutePathError,
+      lastRoutePathErrorAt: state.lastRoutePathErrorAt,
+      priorityYieldUntil: state.combatYieldUntil,
       lastPathAt: state.lastPathAt,
       lastProgressAt: state.lastProgressAt,
       pendingTransitionSource: cloneValue(state.pendingTransitionSource),
       pausedForCombat: state.pausedForCombat,
+      pausedForFloorMove: state.pausedForFloorMove,
       pausedForVerification: state.pausedForVerification && config.pauseWaypointsOnVerification,
       lastVerificationNotice: state.lastVerificationNotice,
       lastVerificationSeenAt: state.lastVerificationSeenAt,
@@ -5408,6 +5649,9 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
   function updateConfig(nextConfig = {}) {
     Object.assign(config, nextConfig);
     config.prioritizeMonsters = config.prioritizeMonsters === true;
+    config.autoRecoverWaypoints = config.autoRecoverWaypoints !== false;
+    config.limitChaseToRoute = config.limitChaseToRoute === true;
+    config.maxChaseFromRouteTiles = Math.max(2, Math.min(20, Math.trunc(Number(config.maxChaseFromRouteTiles) || 6)));
     config.pauseWaypointsOnVerification = config.pauseWaypointsOnVerification === true;
     config.verificationScanTickMs = Math.max(200, Math.min(5000, Math.round(Number(config.verificationScanTickMs) || 500)));
     config.tickMs = 500;
@@ -5438,6 +5682,7 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     status,
     updateConfig,
     resumeAfterVerification,
+    setFloorMovePause,
     scanVerificationNotice,
     config,
     getRoute,
@@ -6725,6 +6970,341 @@ window.__minibiaBotBundle.installTalkModule = function installTalkModule(bot) {
 };
 window.__minibiaBotBundle = window.__minibiaBotBundle || {};
 
+window.__minibiaBotBundle.installFloorMoveModule = function installFloorMoveModule(bot) {
+  const storageKey = "minibiaBot.floorMove.config";
+  const state = {
+    running: false,
+    timerId: null,
+    lastAttemptAt: 0,
+    lastAttempt: null,
+    recent: new Map(),
+    unreachable: new Map(),
+    navigation: null,
+  };
+  const config = Object.assign({
+    enabled: false,
+    items: "", // comma-separated exact item names or numeric client IDs
+    includeRares: false, // only items explicitly flagged isRare in Minibia's Loot List
+    walkToVisible: true, // use safe same-floor pathfinding toward visible matching items
+    tickMs: 1000,
+    moveCooldownMs: 10000,
+    sameItemCooldownMs: 60000,
+  }, bot.storage.get(storageKey, {}));
+
+  function normalize() {
+    config.items = String(config.items || "").slice(0, 1000);
+    config.includeRares = config.includeRares === true;
+    config.walkToVisible = config.walkToVisible !== false;
+    config.tickMs = Math.max(500, Math.min(5000, Math.round(Number(config.tickMs) || 1000)));
+    config.moveCooldownMs = Math.max(3000, Math.min(60000, Math.round(Number(config.moveCooldownMs) || 10000)));
+    config.sameItemCooldownMs = Math.max(10000, Math.min(300000, Math.round(Number(config.sameItemCooldownMs) || 60000)));
+  }
+  function persist() { bot.storage.set(storageKey, { ...config }); }
+  function specifications() {
+    const tokens = config.items.split(/[,;\n]/).map(x => x.trim().toLowerCase()).filter(Boolean);
+    return { ids: new Set(tokens.filter(x => /^\d+$/.test(x)).map(Number)),
+      names: new Set(tokens.filter(x => !/^\d+$/.test(x))) };
+  }
+  // Rarity is NOT encoded on floor items. It comes from Minibia's /lootlist
+  // server payload (entry.isRare) after the player opens Loot List in-game.
+  // Prefer the catalog's client IDs (cid), because floor item.id is a CID.
+  // Never assume an item is Rare when the catalog has not been loaded.
+  function rareCatalog() {
+    const modal = window.gameClient?.interface?.modalManager?.get?.("lootlist-modal");
+    const items = modal?.__items;
+    if (!Array.isArray(items) || items.length === 0) {
+      return {ready:false, count:0, cids:new Set(), sids:new Set(), names:new Set()};
+    }
+    const cids = new Set(), sids = new Set(), names = new Set();
+    for (const entry of items) {
+      if (entry?.isRare !== true) continue;
+      const cid = Number(entry.cid), sid = Number(entry.sid);
+      if (Number.isInteger(cid) && cid > 0) cids.add(cid);
+      if (Number.isInteger(sid) && sid > 0) sids.add(sid);
+      if ((!cid || cid <= 0) && entry.name) names.add(String(entry.name).trim().toLowerCase());
+    }
+    return {ready:true, count:cids.size + names.size, cids, sids, names};
+  }
+  function rareMatch(item, catalog) {
+    if (!catalog.ready) return false;
+    if (catalog.cids.has(Number(item?.id))) return true;
+    if (catalog.sids.has(Number(item?.sid))) return true;
+    // Fallback only for catalog entries without a usable client ID.
+    const name = getItemName(item);
+    return !!name && catalog.names.has(name);
+  }
+  function getTile(x, y, z) {
+    if (!window.gameClient?.world?.getTileFromWorldPosition || typeof Position !== "function") return null;
+    return window.gameClient.world.getTileFromWorldPosition(new Position(x, y, z)) || null;
+  }
+  function getItemName(item) {
+    const id = Number(item?.id);
+    const client = window.gameClient;
+    const def = client?.itemDefinitionsByCid?.[id] ||
+      client?.itemDefinitionsBySid?.[id] || client?.itemDefinitions?.[id];
+    return String(def?.properties?.name || item?.name || "").trim().toLowerCase();
+  }
+  function matches(item, filter) {
+    return filter.ids.has(Number(item?.id)) || (getItemName(item) && filter.names.has(getItemName(item)));
+  }
+  function sameFloorPosition() {
+    const pos = bot.getPlayerPosition?.();
+    if (!pos || ![pos.x, pos.y, pos.z].every(Number.isFinite)) return null;
+    return pos;
+  }
+  function tileIsTransition(tile) {
+    if (!tile) return true;
+    const pieces = [tile, ...(Array.isArray(tile.items) ? tile.items : [])];
+    return pieces.some(piece => {
+      const id = Number(piece?.id);
+      const client = window.gameClient;
+      const def = client?.itemDefinitionsByCid?.[id] || client?.itemDefinitionsBySid?.[id] || client?.itemDefinitions?.[id];
+      const name = String(def?.properties?.name || piece?.name || "").toLowerCase();
+      return def?.properties?.floorchange === true || id === 1948 || id === 1968 ||
+        /\b(stairs?|ladder|hole|teleport|ramp|rope spot)\b/.test(name);
+    });
+  }
+  function safeDestination(tile, me, x, y) {
+    if (!tile || !tile.id || tileIsTransition(tile) || !tile.isWalkable?.() ||
+        tile.isItemBlocked?.() || tile.isNotPathable?.()) return false;
+    // Only empty ground, no active creature, and never the player's square.
+    if (Array.isArray(tile.items) && tile.items.length) return false;
+    if ((tile.monsters && tile.monsters.size) || (me.x === x && me.y === y)) return false;
+    return true;
+  }
+  // Keep parity with the actual client viewport check used by Xray.
+  // This scans only currently loaded, on-screen tiles on the player's floor.
+  function visibleItems() {
+    const me = sameFloorPosition();
+    if (!me) return [];
+    const results = [];
+    for (let dx = -8; dx <= 8; dx++) {
+      for (let dy = -6; dy <= 6; dy++) {
+        const x = me.x + dx, y = me.y + dy;
+        const tile = getTile(x, y, me.z);
+        if (!tile || tileIsTransition(tile) || !Array.isArray(tile.items)) continue;
+        tile.items.forEach((item, index) => {
+          if (!item || !item.id) return;
+          results.push({id:Number(item.id), name:getItemName(item), x, y, z:me.z,
+            index, tile, item});
+        });
+      }
+    }
+    return results;
+  }
+  // Non-secret preview. Keep the old method name for console compatibility.
+  function scanNearby() {
+    return visibleItems().map(({id,name,x,y,z}) => ({id,name,x,y,z})).slice(0, 60);
+  }
+  function distance(a,b) {
+    if (!a || !b || a.z !== b.z) return Infinity;
+    return Math.max(Math.abs(a.x-b.x),Math.abs(a.y-b.y));
+  }
+  function positionKey(p) { return p ? `${p.x},${p.y},${p.z}` : null; }
+  function itemKey(source) { return `${source.id}:${source.x}:${source.y}:${source.z}`; }
+  function pathfinder() { return window.gameClient?.world?.pathfinder; }
+  function isSafePath(path, floor) {
+    // Never trust an unvalidated server mapclick or a partly loaded route.
+    return Array.isArray(path) && path.length > 0 && path.every(tile =>
+      tile?.__position && Number(tile.__position.z) === floor &&
+      !tileIsTransition(tile));
+  }
+  // Walk to a safe walkable square NEXT TO the item; never walk onto the item.
+  function reachableStandPosition(source, me) {
+    if (distance(me,source) <= 1) return me;
+    const pf=pathfinder();
+    if (!pf?.search || typeof Position !== "function") return null;
+    if (window.gameClient?.interface?.settings?.isServerMapclickEnabled?.()) return null;
+    const origin=getTile(me.x,me.y,me.z);
+    if (!origin) return null;
+    const offsets=[[-1,0],[1,0],[0,-1],[0,1],[-1,-1],[-1,1],[1,-1],[1,1]];
+    let best=null, bestLength=Infinity;
+    for (const [dx,dy] of offsets) {
+      const x=source.x+dx,y=source.y+dy;
+      const tile=getTile(x,y,source.z);
+      if (!safeDestination(tile,me,x,y)) continue;
+      try {
+        const path=pf.search(origin,tile);
+        if (!isSafePath(path,source.z)) continue;
+        if (path.length<bestLength) {best={x,y,z:source.z};bestLength=path.length;}
+      } catch (_error) { /* Unreachable candidate, try another. */ }
+    }
+    return best;
+  }
+  function cancelOwnWalk() {
+    const pf=pathfinder();
+    const nav=state.navigation;
+    if (nav && pf?.setPathfindCache &&
+        positionKey(pf.__finalDestination) === positionKey(nav.destination)) {
+      pf.setPathfindCache(null);
+    }
+  }
+  function releaseNavigation() {
+    cancelOwnWalk();
+    state.navigation=null;
+    bot.cave?.setFloorMovePause?.(false);
+  }
+  function walkToward(source, destination, me, now) {
+    if (!config.walkToVisible || typeof Position !== "function") return false;
+    const pf=pathfinder();
+    if (!pf?.findPath) return false;
+    const key=itemKey(source);
+    const here=positionKey(me);
+    const destinationKey=positionKey(destination);
+    let nav=state.navigation;
+    if (nav && (nav.key!==key || positionKey(nav.destination)!==destinationKey)) {
+      releaseNavigation(); nav=null;
+    }
+    if (!nav) {
+      nav={key,destination,startedAt:now,lastProgressAt:now,
+        lastPlayerPosition:here,lastPathAt:0};
+      state.navigation=nav;
+    }
+    if (here!==nav.lastPlayerPosition) {
+      nav.lastPlayerPosition=here;nav.lastProgressAt=now;
+    }
+    if (now-nav.lastProgressAt>10000 || now-nav.startedAt>30000) {
+      state.unreachable.set(key,now+30000);
+      bot.log("floor item unreachable; cooldown applied",{itemId:source.id,x:source.x,y:source.y});
+      releaseNavigation();
+      return false;
+    }
+    // CaveBot must release its waypoint path before the item walk begins.
+    bot.cave?.setFloorMovePause?.(true);
+    if (now-nav.lastPathAt<2500) return true;
+    // Validate again before dispatch, because the map may have changed.
+    const validated=reachableStandPosition(source,me);
+    if (!validated || positionKey(validated)!==destinationKey) {
+      releaseNavigation();return false;
+    }
+    try {
+      pf.findPath(new Position(me.x,me.y,me.z),
+        new Position(destination.x,destination.y,destination.z));
+      nav.lastPathAt=now;
+      return true;
+    } catch (error) {
+      bot.log("floor item pathfind failed",error?.message||error);
+      releaseNavigation();return false;
+    }
+  }
+  function destinationFor(source, me) {
+    const options = [
+      [-1,0],[1,0],[0,-1],[0,1],[-1,-1],[1,-1],[-1,1],[1,1],
+    ];
+    for (const [dx,dy] of options) {
+      const x=source.x+dx, y=source.y+dy;
+      const tile=getTile(x,y,source.z);
+      if (safeDestination(tile,me,x,y)) return { tile, x, y };
+    }
+    return null;
+  }
+  function tryMove(now = Date.now()) {
+    if (!state.running || !window.gameClient?.send || typeof ItemMovePacket!=="function") return false;
+    if (!config.items.trim() && !config.includeRares) return false;
+    const me=sameFloorPosition();
+    if (!me) {releaseNavigation();return false;}
+    // Do not walk or move an item while a verification has paused navigation.
+    if (bot.cave?.status?.().pausedForVerification) {
+      releaseNavigation();return false;
+    }
+    // Combat is always higher priority than moving items or waypoints.
+    const activeTarget=window.gameClient?.player?.target || window.gameClient?.player?.__target;
+    if (activeTarget || bot.attack?.hasPriorityMonsters?.(now)) {
+      releaseNavigation();return false;
+    }
+    const filter=specifications();
+    const rares=config.includeRares?rareCatalog():null;
+    const matching=visibleItems().filter(source =>
+      (matches(source.item,filter) ||
+       (config.includeRares && rareMatch(source.item,rares))) &&
+      source.item.isMoveable?.()!==false &&
+      now-(state.recent.get(itemKey(source)) || 0)>=config.sameItemCooldownMs &&
+      (state.unreachable.get(itemKey(source)) || 0)<=now);
+    if (!matching.length) {releaseNavigation();return false;}
+    matching.sort((a,b)=>distance(a,me)-distance(b,me));
+    // Finish the current item first to avoid target-switch oscillation.
+    const source=matching.find(item=>itemKey(item)===state.navigation?.key) || matching[0];
+    if (distance(me,source)>1) {
+      if (!config.walkToVisible) {releaseNavigation();return false;}
+      const destination=reachableStandPosition(source,me);
+      if (!destination) {
+        state.unreachable.set(itemKey(source),now+30000);
+        releaseNavigation();return false;
+      }
+      return walkToward(source,destination,me,now);
+    }
+    releaseNavigation();
+    if (now-state.lastAttemptAt<config.moveCooldownMs) return false;
+    const dest=destinationFor(source,me);
+    if (!dest) return false;
+    const key=itemKey(source);
+    const destKey=`${source.id}:${dest.x}:${dest.y}:${source.z}`;
+    state.recent.set(key,now);
+    state.recent.set(destKey,now);
+    state.lastAttemptAt=now;
+    try {
+      window.gameClient.send(new ItemMovePacket(
+        {which:source.tile,index:source.index},
+        {which:dest.tile,index:0xFF},1));
+      state.lastAttempt={at:now,itemId:source.id,name:source.name,
+        from:{x:source.x,y:source.y,z:source.z},
+        to:{x:dest.x,y:dest.y,z:source.z}};
+      bot.log("floor item move requested",state.lastAttempt);
+    } catch (error) {
+      bot.log("floor item move failed",error?.message||error);
+      return false;
+    }
+    if (state.recent.size>300) for (const [key,time] of state.recent) {
+      if (now-time>config.sameItemCooldownMs) state.recent.delete(key);
+    }
+    if (state.unreachable.size>300) for (const [key,expiry] of state.unreachable) {
+      if (expiry<now) state.unreachable.delete(key);
+    }
+    return true;
+  }
+  function tick() {
+    if (!state.running) return;
+    try { tryMove(); }
+    catch (error) { bot.log("floor item scan failed", error?.message || error); }
+    finally { if (state.running) state.timerId = window.setTimeout(tick, config.tickMs); }
+  }
+  function start(overrides={}) {
+    Object.assign(config, overrides, {enabled:true});
+    normalize();
+    if (!config.items.trim() && !config.includeRares) { config.enabled=false; persist(); return false; }
+    persist();
+    if (state.running) return true;
+    state.running=true;
+    tick();
+    return true;
+  }
+  function stop(options={}) {
+    state.running=false;
+    releaseNavigation();
+    if (state.timerId != null) window.clearTimeout(state.timerId);
+    state.timerId=null;
+    if (options.persistEnabled !== false) { config.enabled=false; persist(); }
+    return true;
+  }
+  function updateConfig(next={}) {
+    Object.assign(config,next);
+    normalize();
+    persist();
+    return {...config};
+  }
+  function status() {
+    const rares = config.includeRares ? rareCatalog() : null;
+    return {running:state.running,config:{...config},lastAttempt:state.lastAttempt,
+      rareCatalogReady:rares?.ready ?? false, rareCount:rares?.count ?? 0,
+      navigatingTo:state.navigation?.destination || null};
+  }
+  normalize();
+  // Never auto-start on boot, even if a previous session was enabled.
+  bot.floorMove={start,stop,status,updateConfig,scanNearby,tryMove};
+  bot.addCleanup?.(() => stop({persistEnabled:false}));
+};
+window.__minibiaBotBundle = window.__minibiaBotBundle || {};
+
 window.__minibiaBotBundle.installPanel = function installPanel(bot) {
   const panelPositionKey = "minibiaBot.ui.panelPosition";
   const panelCollapsedKey = "minibiaBot.ui.panelCollapsed";
@@ -7760,6 +8340,31 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
               <div class="mb-small-note">It will not reply to itself and will not admit it is a bot.</div>
             </div>
           </div>
+          <div class="mb-section mb-column-section">
+            <div class="mb-label">Move Floor Items</div>
+            <div class="mb-stack">
+              <label class="mb-toggle">
+                <input type="checkbox" id="minibia-bot-floor-move-enabled" />
+                <span>Move matching floor items</span>
+              </label>
+              <label class="mb-toggle">
+                <input type="checkbox" id="minibia-bot-floor-move-rares" />
+                <span>Include Rare (from Minibia Auto Loot)</span>
+              </label>
+              <label class="mb-toggle">
+                <input type="checkbox" id="minibia-bot-floor-move-walk" />
+                <span>Walk to matching items visible on screen</span>
+              </label>
+              <div class="mb-small-note">Open Minibia's Loot List once per session to load the server-defined Rare items; otherwise this filter waits without moving anything.</div>
+              <label class="mb-field" for="minibia-bot-floor-move-items">
+                <span class="mb-field-label">Exact names / item IDs (comma separated)</span>
+                <input type="text" id="minibia-bot-floor-move-items" placeholder="e.g. crystal coin, 3035" />
+              </label>
+              <button type="button" class="mb-small-button" id="minibia-bot-floor-move-scan">Scan visible tiles</button>
+              <div class="mb-small-note" id="minibia-bot-floor-move-status">Off</div>
+              <div class="mb-small-note">Scans on-screen tiles on the current floor. If walking is enabled, approaches safely and moves one matching item to a free adjacent tile; never picks it up. Combat takes precedence.</div>
+            </div>
+          </div>
         </div>
         <div class="mb-cave-column">
           <div class="mb-section mb-column-section">
@@ -7785,6 +8390,15 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
                 <span>Prioritize Monsters</span>
               </label>
               <div class="mb-small-note">When Auto Attack is active, pause waypoints while monsters are in targeting range. Melee Mode is needed to approach distant targets.</div>
+              <label class="mb-toggle">
+                <input type="checkbox" id="minibia-bot-cave-limit-chase" />
+                <span>Limit Melee Chase to Route</span>
+              </label>
+              <label class="mb-field" for="minibia-bot-cave-max-chase">
+                <span class="mb-field-label">Max distance from waypoint (tiles, 2-20)</span>
+                <input type="number" id="minibia-bot-cave-max-chase" min="2" max="20" step="1" value="6" />
+              </label>
+              <div class="mb-small-note">Only with Cave Bot running and Melee Mode on. Stop chasing beyond the radius and resume waypoints. Add intermediate waypoints along long corridors.</div>
               <label class="mb-toggle">
                 <input type="checkbox" id="minibia-bot-cave-verification-pause" />
                 <span>Pause waypoints on anti-bot notice</span>
@@ -7862,6 +8476,12 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     const autoAttackMeleeInput = panel.querySelector("#minibia-bot-auto-attack-melee");
     const autoAttackHotkeyInput = panel.querySelector("#minibia-bot-auto-attack-hotkey");
     const autoAttackRuneHotkeyInput = panel.querySelector("#minibia-bot-auto-attack-rune-hotkey");
+    const floorMoveToggle = panel.querySelector("#minibia-bot-floor-move-enabled");
+    const floorMoveItems = panel.querySelector("#minibia-bot-floor-move-items");
+    const floorMoveRares = panel.querySelector("#minibia-bot-floor-move-rares");
+    const floorMoveWalk = panel.querySelector("#minibia-bot-floor-move-walk");
+    const floorMoveScan = panel.querySelector("#minibia-bot-floor-move-scan");
+    const floorMoveStatus = panel.querySelector("#minibia-bot-floor-move-status");
     const talkEnabledInput = panel.querySelector("#minibia-bot-talk-enabled");
     const talkNpcInput = panel.querySelector("#minibia-bot-talk-npc-replies");
     const talkApiKeyInput = panel.querySelector("#minibia-bot-talk-api-key");
@@ -7878,6 +8498,8 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     const collapseButton = panel.querySelector("#minibia-bot-collapse");
     const reloadButton = panel.querySelector("#minibia-bot-reload");
     const cavePrioritizeMonstersInput = panel.querySelector("#minibia-bot-cave-prioritize-monsters");
+    const caveLimitChaseInput = panel.querySelector("#minibia-bot-cave-limit-chase");
+    const caveMaxChaseInput = panel.querySelector("#minibia-bot-cave-max-chase");
     const caveVerificationPauseInput = panel.querySelector("#minibia-bot-cave-verification-pause");
     const caveVerificationTickInput = panel.querySelector("#minibia-bot-cave-verification-tick");
     const caveResumeVerificationButton = panel.querySelector("#minibia-bot-cave-resume-verification");
@@ -8075,6 +8697,23 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
       cavePrioritizeMonstersInput.addEventListener("change", () => {
         bot.cave.updateConfig({ prioritizeMonsters: cavePrioritizeMonstersInput.checked });
         refreshCaveStatus();
+      });
+    }
+
+    if (caveLimitChaseInput) {
+      caveLimitChaseInput.checked = bot.cave?.config?.limitChaseToRoute === true;
+      caveLimitChaseInput.addEventListener("change", () => {
+        bot.cave.updateConfig({ limitChaseToRoute: caveLimitChaseInput.checked });
+        refreshCaveStatus();
+      });
+    }
+
+    if (caveMaxChaseInput) {
+      caveMaxChaseInput.value = String(bot.cave?.config?.maxChaseFromRouteTiles ?? 6);
+      caveMaxChaseInput.addEventListener("change", () => {
+        const maxChaseFromRouteTiles = Math.max(2, Math.min(20, Math.trunc(Number(caveMaxChaseInput.value) || 6)));
+        caveMaxChaseInput.value = String(maxChaseFromRouteTiles);
+        bot.cave.updateConfig({ maxChaseFromRouteTiles });
       });
     }
 
@@ -8313,6 +8952,50 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
       });
     }
 
+    if (floorMoveToggle && floorMoveItems && floorMoveStatus) {
+      const floorStatus = bot.floorMove.status();
+      floorMoveItems.value = floorStatus.config.items || "";
+      floorMoveRares.checked = !!floorStatus.config.includeRares;
+      floorMoveWalk.checked = !!floorStatus.config.walkToVisible;
+      floorMoveToggle.checked = !!floorStatus.running;
+      floorMoveItems.addEventListener("change", () => {
+        bot.floorMove.updateConfig({items:floorMoveItems.value});
+      });
+      floorMoveWalk.addEventListener("change", () => {
+        bot.floorMove.updateConfig({walkToVisible:floorMoveWalk.checked});
+      });
+      floorMoveRares.addEventListener("change", () => {
+        bot.floorMove.updateConfig({includeRares:floorMoveRares.checked});
+        if (floorMoveToggle.checked) {
+          const status = bot.floorMove.status();
+          floorMoveStatus.textContent = status.config.includeRares && !status.rareCatalogReady ?
+            "Waiting for Loot List — open it once in Minibia" : "Active";
+        }
+      });
+      floorMoveToggle.addEventListener("change", () => {
+        bot.floorMove.updateConfig({items:floorMoveItems.value,includeRares:floorMoveRares.checked,walkToVisible:floorMoveWalk.checked});
+        if (floorMoveToggle.checked) {
+          if (!bot.floorMove.start()) {
+            floorMoveToggle.checked = false;
+            floorMoveStatus.textContent = "Select Rare or enter a name/ID";
+            return;
+          }
+        } else bot.floorMove.stop();
+        const status = bot.floorMove.status();
+        floorMoveStatus.textContent = !floorMoveToggle.checked ? "Off" :
+          (status.config.includeRares && !status.rareCatalogReady ?
+            "Waiting for Loot List — open it once in Minibia" : "Active");
+      });
+      floorMoveScan?.addEventListener("click", () => {
+        const nearby = bot.floorMove.scanNearby();
+        const status = bot.floorMove.status();
+        floorMoveStatus.textContent = (status.config.includeRares ?
+          (status.rareCatalogReady ? `Rare catalog: ${status.rareCount} IDs. ` : "Rare catalog not loaded. ") : "") +
+          (nearby.length ? nearby.slice(0,8).map(item => `${item.name || "unknown"} (#${item.id})`).join(", ") :
+            "No items visible on current floor");
+      });
+    }
+
     if (talkApiKeyInput) {
       talkApiKeyInput.value = bot.talk?.config?.apiKey || "";
       talkApiKeyInput.addEventListener("change", () => {
@@ -8541,6 +9224,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     currentBundle.installEquipRingModule(bot);
     currentBundle.installAutoEatModule(bot);
     currentBundle.installTalkModule(bot);
+    currentBundle.installFloorMoveModule(bot);
     currentBundle.installPanel(bot);
 
     bot.ui.inject();
@@ -8564,6 +9248,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
       equipRing: bot.equipRing.status(),
       eat: bot.eat.status(),
       talk: bot.talk.status(),
+      floorMove: bot.floorMove.status(),
     });
 
     window.minibiaBot = bot;
@@ -8598,6 +9283,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     console.log("minibiaBot.eat.stop()");
     console.log("minibiaBot.talk.updateConfig({ apiKey: \"...\" })");
     console.log("minibiaBot.talk.start()");
+    console.log("minibiaBot.floorMove.scanNearby()");
     console.log("minibiaBot.talk.stop()");
     return bot;
   }
