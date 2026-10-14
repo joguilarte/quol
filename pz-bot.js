@@ -2737,6 +2737,8 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
     lastTargetHotkeyAt: 0,
     lastRuneHotkeyAt: 0,
     engagedTargetId: null,
+    nearerTargetId: null,
+    nearerTargetSince: 0,
     combatStartedAt: 0,
     lastChaseAt: 0,
     lastChaseDestinationKey: null,
@@ -2881,6 +2883,8 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
 
   function clearEngagedTarget() {
     state.engagedTargetId = null;
+    state.nearerTargetId = null;
+    state.nearerTargetSince = 0;
     state.combatStartedAt = 0;
     state.lastChaseDestinationKey = null;
     resetFollowProgress();
@@ -2984,9 +2988,18 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
       return false;
     }
 
+    // Never send TargetPacket again for a creature we are already fighting.
+    // The client can briefly report __target=null between game updates.
+    if (isSameCreature(getCurrentTarget(), target) || state.engagedTargetId === target.id) {
+      return false;
+    }
+
     window.gameClient.player.setTarget(target);
     window.gameClient.send(new TargetPacket(target.id));
     state.engagedTargetId = target.id;
+    state.nearerTargetId = null;
+    state.nearerTargetSince = 0;
+    resetFollowProgress();
     return true;
   }
 
@@ -3052,6 +3065,46 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
         const rightDistance = getTileDistance(playerPosition, normalizePosition(right?.getPosition?.() || right?.__position));
         return leftDistance - rightDistance || Number(left?.id || 0) - Number(right?.id || 0);
       });
+  }
+
+  // Prefer the active monster and switch only when another is strictly closer
+  // for a stable period. No duplicate selection of the same creature ID.
+  function getPreferredMeleeTarget(now = Date.now()) {
+    const candidates = getMonsterCandidates(now);
+    const engaged = getEngagedTarget();
+    if (!engaged || isTargetSkipped(engaged, now)) {
+      state.nearerTargetId = null;
+      state.nearerTargetSince = 0;
+      return candidates[0] || null;
+    }
+
+    const nearest = candidates[0] || null;
+    if (!nearest || isSameCreature(nearest, engaged)) {
+      state.nearerTargetId = null;
+      state.nearerTargetSince = 0;
+      return engaged;
+    }
+
+    const playerPosition = normalizePosition(bot.getPlayerPosition());
+    const engagedDistance = getTileDistance(playerPosition, normalizePosition(engaged.getPosition?.() || engaged.__position));
+    const nearestDistance = getTileDistance(playerPosition, normalizePosition(nearest.getPosition?.() || nearest.__position));
+    if (!(nearestDistance < engagedDistance)) {
+      state.nearerTargetId = null;
+      state.nearerTargetSince = 0;
+      return engaged;
+    }
+
+    if (state.nearerTargetId !== nearest.id) {
+      state.nearerTargetId = nearest.id;
+      state.nearerTargetSince = now;
+      return engaged;
+    }
+
+    // Ignore short-lived changes from animation/pathfinding to avoid thrashing.
+    if (now - state.nearerTargetSince < 1000) {
+      return engaged;
+    }
+    return nearest;
   }
 
   function shouldGiveUpTarget(target) {
@@ -3234,20 +3287,19 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
   }
 
   function canAttack(now = Date.now()) {
-    const slot = normalizeHotbarSlot(config.targetHotbarSlot);
-    if (!slot) {
-      return false;
-    }
-
     if (now - state.lastTargetHotkeyAt < Math.max(0, Number(config.targetCooldownMs) || 0)) {
       return false;
     }
 
     if (config.meleeMode) {
-      return getMonsterCandidates(now).length > 0 && !getCurrentTarget();
+      // Melee selects directly via TargetPacket, not by pressing the hotbar.
+      const wanted = getPreferredMeleeTarget(now);
+      return !!wanted && !isSameCreature(getCurrentTarget(), wanted)
+        && state.engagedTargetId !== wanted.id;
     }
 
-    return getNearbyMonsters().length > 0;
+    const slot = normalizeHotbarSlot(config.targetHotbarSlot);
+    return !!slot && getNearbyMonsters().length > 0;
   }
 
   function triggerAttack(now = Date.now()) {
@@ -3256,9 +3308,11 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
     }
 
     const engagedTarget = getEngagedTarget();
-    const preferredTarget = engagedTarget && !isTargetSkipped(engagedTarget, now)
-      ? engagedTarget
-      : (getMonsterCandidates(now)[0] || null);
+    const preferredTarget = config.meleeMode
+      ? getPreferredMeleeTarget(now)
+      : (engagedTarget && !isTargetSkipped(engagedTarget, now)
+        ? engagedTarget
+        : (getMonsterCandidates(now)[0] || null));
     if (preferredTarget && setCurrentTarget(preferredTarget)) {
       state.lastTargetHotkeyAt = now;
       markCombatActive(now);
@@ -3335,13 +3389,9 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
 
     if (config.meleeMode) {
       const chased = syncMeleeChase(now);
-      if (getCurrentTarget()) {
-        return false;
-      }
-
-      if (chased) {
-        return triggerAttack(now) || true;
-      }
+      // Allow a genuine closer monster to replace the target, but never
+      // re-send TargetPacket for the same creature after a transient null.
+      return triggerAttack(now) || chased;
     }
 
     if (getCurrentTarget()) {
