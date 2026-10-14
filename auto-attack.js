@@ -8,6 +8,8 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
     lastTargetHotkeyAt: 0,
     lastRuneHotkeyAt: 0,
     engagedTargetId: null,
+    targetMissingSince: 0,
+    lastEngagedSeenAt: 0,
     nearerTargetId: null,
     nearerTargetSince: 0,
     combatStartedAt: 0,
@@ -154,6 +156,8 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
 
   function clearEngagedTarget() {
     state.engagedTargetId = null;
+    state.targetMissingSince = 0;
+    state.lastEngagedSeenAt = 0;
     state.nearerTargetId = null;
     state.nearerTargetSince = 0;
     state.combatStartedAt = 0;
@@ -229,6 +233,8 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
     const currentTarget = getCurrentTarget();
     if (currentTarget) {
       state.engagedTargetId = currentTarget.id;
+      state.lastEngagedSeenAt = Date.now();
+      state.targetMissingSince = 0;
       return currentTarget;
     }
 
@@ -236,14 +242,17 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
       return null;
     }
 
-    const followTarget = getCurrentFollowTarget();
-    if (followTarget && followTarget.id === state.engagedTargetId) {
-      return findNearbyMonster(followTarget) || followTarget;
-    }
-
+    // A FollowPacket can outlive the creature. Prioritize live/visible mobs.
     const nearbyTarget = findNearbyMonsterById(state.engagedTargetId);
     if (nearbyTarget) {
+      state.lastEngagedSeenAt = Date.now();
       return nearbyTarget;
+    }
+
+    const followTarget = getCurrentFollowTarget();
+    if (followTarget && followTarget.id === state.engagedTargetId &&
+        Date.now() - state.lastEngagedSeenAt < 1500) {
+      return followTarget;
     }
 
     clearEngagedTarget();
@@ -259,15 +268,17 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
       return false;
     }
 
-    // Never send TargetPacket again for a creature we are already fighting.
-    // The client can briefly report __target=null between game updates.
-    if (isSameCreature(getCurrentTarget(), target) || state.engagedTargetId === target.id) {
+    // No duplicate packets while the client still has this target.
+    // Recovery of a lost target is separately debounced by canAttack().
+    if (isSameCreature(getCurrentTarget(), target)) {
       return false;
     }
 
     window.gameClient.player.setTarget(target);
     window.gameClient.send(new TargetPacket(target.id));
     state.engagedTargetId = target.id;
+    state.targetMissingSince = 0;
+    state.lastEngagedSeenAt = Date.now();
     state.nearerTargetId = null;
     state.nearerTargetSince = 0;
     resetFollowProgress();
@@ -372,7 +383,7 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
     }
 
     // Ignore short-lived changes from animation/pathfinding to avoid thrashing.
-    if (now - state.nearerTargetSince < 1000) {
+    if (now - state.nearerTargetSince < 300) {
       return engaged;
     }
     return nearest;
@@ -558,17 +569,51 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
   }
 
   function canAttack(now = Date.now()) {
+    if (config.meleeMode) {
+      // Melee selects via TargetPacket, never by pressing the hotbar.
+      const wanted = getPreferredMeleeTarget(now);
+      if (!wanted) {
+        state.targetMissingSince = 0;
+        return false;
+      }
+
+      const current = getCurrentTarget();
+      if (isSameCreature(current, wanted)) {
+        state.targetMissingSince = 0;
+        return false;
+      }
+
+      const switchingCreature = state.engagedTargetId != null &&
+        state.engagedTargetId !== wanted.id;
+      const targetSelectionCooldownMs = switchingCreature
+        ? 700
+        : Math.max(0, Number(config.targetCooldownMs) || 0);
+      if (now - state.lastTargetHotkeyAt < targetSelectionCooldownMs) {
+        return false;
+      }
+
+      // The previous patch blocked the same ID forever, even when the game
+      // had stopped attacking it. Ignore brief nulls, then re-acquire slowly.
+      if (!current && state.engagedTargetId === wanted.id) {
+        if (!state.targetMissingSince) {
+          state.targetMissingSince = now;
+          return false;
+        }
+        if (now - state.targetMissingSince < 1500) {
+          return false;
+        }
+        if (now - state.lastTargetHotkeyAt < Math.max(2500, Number(config.targetCooldownMs) || 0)) {
+          return false;
+        }
+      } else {
+        state.targetMissingSince = 0;
+      }
+      return true;
+    }
+
     if (now - state.lastTargetHotkeyAt < Math.max(0, Number(config.targetCooldownMs) || 0)) {
       return false;
     }
-
-    if (config.meleeMode) {
-      // Melee selects directly via TargetPacket, not by pressing the hotbar.
-      const wanted = getPreferredMeleeTarget(now);
-      return !!wanted && !isSameCreature(getCurrentTarget(), wanted)
-        && state.engagedTargetId !== wanted.id;
-    }
-
     const slot = normalizeHotbarSlot(config.targetHotbarSlot);
     return !!slot && getNearbyMonsters().length > 0;
   }
@@ -659,10 +704,11 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
     syncCombatState(now);
 
     if (config.meleeMode) {
+      // Choose the actual nearest target BEFORE issuing FollowPacket, so the
+      // movement command does not keep chasing the previous farther target.
+      const selected = triggerAttack(now);
       const chased = syncMeleeChase(now);
-      // Allow a genuine closer monster to replace the target, but never
-      // re-send TargetPacket for the same creature after a transient null.
-      return triggerAttack(now) || chased;
+      return selected || chased;
     }
 
     if (getCurrentTarget()) {

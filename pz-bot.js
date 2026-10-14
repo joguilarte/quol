@@ -1969,10 +1969,10 @@ window.__minibiaBotBundle.installHealModule = function installHealModule(bot) {
 
   const config = Object.assign(
     {
-      tickMs: 50,
+      tickMs: 200,
       healCooldownMs: 1200,
-      healRetryMs: 200,
-      healConfirmMs: 250,
+      healRetryMs: 3000,
+      healConfirmMs: 600,
       minHp: 250,
       hpHotbarSlot: 1,
       minMana: 150,
@@ -2017,6 +2017,58 @@ window.__minibiaBotBundle.installHealModule = function installHealModule(bot) {
     return normalized;
   }
 
+  // Hotkeys may contain spells, custom text, items or combat actions.
+  // Do not press a spell unless the player has enough mana to cast it.
+  function getHealSlotInfo(slotNumber) {
+    const index = normalizeHotbarSlot(slotNumber);
+    const slot = index == null ? null : window.gameClient?.interface?.hotbarManager?.slots?.[index - 1];
+    if (!slot || !slot.canvas?.canvas) return null;
+
+    const spells = window.gameClient?.interface?.SPELLS;
+    let spell = slot.spell || null;
+    if (!spell && typeof slot.text === "string") {
+      const words = slot.text.trim().toLowerCase();
+      if (Array.isArray(spells)) {
+        const sid = spells.findIndex((candidate) =>
+          candidate?.words?.trim().toLowerCase() === words
+        );
+        if (sid !== -1) {
+          spell = { sid, mana: spells[sid]?.mana ?? 0 };
+        }
+      }
+    }
+    // Arbitrary text and action slots are not healing potions/spells.
+    if (!spell && !slot.item) return null;
+
+    if (!spell) return { slot, manaCost: 0, spell: null };
+    const definition = typeof window.gameClient?.interface?.getSpell === "function"
+      ? window.gameClient.interface.getSpell(spell.sid)
+      : null;
+    const manaCost = Number(definition?.mana ?? spell.mana ?? 0);
+    return { slot, spell, manaCost: Number.isFinite(manaCost) ? Math.max(0, manaCost) : 0 };
+  }
+
+  function canUseHealSlot(slotNumber, stats) {
+    const details = getHealSlotInfo(slotNumber);
+    if (!details || !stats?.mana) return false;
+    if (details.manaCost > stats.mana.current) return false;
+    if (details.spell) {
+      const manager = window.gameClient?.interface?.hotbarManager;
+      if (typeof manager?.__canPlayerCastSpell === "function" &&
+          !manager.__canPlayerCastSpell(details.spell.sid)) return false;
+      const spellbook = window.gameClient?.player?.spellbook;
+      if (spellbook?.cooldowns?.has?.(details.spell.sid) ||
+          (spellbook?.GLOBAL_COOLDOWN != null &&
+           spellbook?.cooldowns?.has?.(spellbook.GLOBAL_COOLDOWN))) return false;
+    }
+    return true;
+  }
+
+  const minFailedRetryMs = 3000;
+  function getRetryMs() {
+    return Math.max(minFailedRetryMs, Number(config.healRetryMs) || 0);
+  }
+
   function hasPendingAttempt() {
     return !!(state.pendingHpAttempt || state.pendingManaAttempt);
   }
@@ -2027,8 +2079,7 @@ window.__minibiaBotBundle.installHealModule = function installHealModule(bot) {
     }
 
     return (
-      stats.hp.current > attempt.hpBefore ||
-      (Number.isFinite(attempt.manaBefore) && Number.isFinite(stats.mana?.current) && stats.mana.current < attempt.manaBefore)
+      stats.hp.current > attempt.hpBefore
     );
   }
 
@@ -2038,8 +2089,7 @@ window.__minibiaBotBundle.installHealModule = function installHealModule(bot) {
     }
 
     return (
-      stats.mana.current > attempt.manaBefore ||
-      (Number.isFinite(attempt.hpBefore) && Number.isFinite(stats.hp?.current) && stats.hp.current > attempt.hpBefore)
+      stats.mana.current > attempt.manaBefore
     );
   }
 
@@ -2050,7 +2100,7 @@ window.__minibiaBotBundle.installHealModule = function installHealModule(bot) {
         state.lastHpHealAt = hpAttempt.attemptedAt;
         state.pendingHpAttempt = null;
         bot.log("confirmed hp heal", { slot: hpAttempt.slot });
-      } else if (now - hpAttempt.attemptedAt >= Math.max(50, Number(config.healConfirmMs) || 0)) {
+      } else if (now - hpAttempt.attemptedAt >= Math.max(500, Number(config.healConfirmMs) || 0)) {
         state.pendingHpAttempt = null;
         bot.log("hp heal did not register", { slot: hpAttempt.slot });
       }
@@ -2062,7 +2112,7 @@ window.__minibiaBotBundle.installHealModule = function installHealModule(bot) {
         state.lastManaHealAt = manaAttempt.attemptedAt;
         state.pendingManaAttempt = null;
         bot.log("confirmed mana heal", { slot: manaAttempt.slot });
-      } else if (now - manaAttempt.attemptedAt >= Math.max(50, Number(config.healConfirmMs) || 0)) {
+      } else if (now - manaAttempt.attemptedAt >= Math.max(500, Number(config.healConfirmMs) || 0)) {
         state.pendingManaAttempt = null;
         bot.log("mana heal did not register", { slot: manaAttempt.slot });
       }
@@ -2072,25 +2122,32 @@ window.__minibiaBotBundle.installHealModule = function installHealModule(bot) {
   function canUseHpHeal(now = Date.now(), stats = readStats()) {
     const { hp } = stats;
     const slot = normalizeHotbarSlot(config.hpHotbarSlot);
-    if (!hp || !slot || state.pendingHpAttempt) return false;
+    if (!hp || !slot || state.pendingHpAttempt || !canUseHealSlot(slot, stats)) return false;
 
     return (
+      Number(config.minHp) > 0 &&
+      hp.max > 0 &&
       hp.current > 0 &&
-      hp.current <= Math.max(0, Number(config.minHp) || 0) &&
-      now - state.lastHpHealAt >= config.healCooldownMs &&
-      now - state.lastHpAttemptAt >= Math.max(50, Number(config.healRetryMs) || 0)
+      hp.current < hp.max &&
+      hp.current <= Number(config.minHp) &&
+      now - state.lastHpHealAt >= Math.max(0, Number(config.healCooldownMs) || 0) &&
+      now - state.lastHpAttemptAt >= getRetryMs()
     );
   }
 
   function canUseManaHeal(now = Date.now(), stats = readStats()) {
     const { mana } = stats;
     const slot = normalizeHotbarSlot(config.manaHotbarSlot);
-    if (!mana || !slot || state.pendingManaAttempt || state.pendingHpAttempt) return false;
+    if (!mana || !slot || state.pendingManaAttempt || state.pendingHpAttempt ||
+        !canUseHealSlot(slot, stats)) return false;
 
     return (
-      mana.current <= Math.max(0, Number(config.minMana) || 0) &&
-      now - state.lastManaHealAt >= config.healCooldownMs &&
-      now - state.lastManaAttemptAt >= Math.max(50, Number(config.healRetryMs) || 0)
+      Number(config.minMana) > 0 &&
+      mana.max > 0 &&
+      mana.current < mana.max &&
+      mana.current <= Number(config.minMana) &&
+      now - state.lastManaHealAt >= Math.max(0, Number(config.healCooldownMs) || 0) &&
+      now - state.lastManaAttemptAt >= getRetryMs()
     );
   }
 
@@ -2241,11 +2298,11 @@ window.__minibiaBotBundle.installHealModule = function installHealModule(bot) {
     }
 
     if (Object.prototype.hasOwnProperty.call(nextConfig, "healRetryMs")) {
-      nextConfig.healRetryMs = Math.max(50, Number(nextConfig.healRetryMs) || 50);
+      nextConfig.healRetryMs = Math.max(minFailedRetryMs, Number(nextConfig.healRetryMs) || minFailedRetryMs);
     }
 
     if (Object.prototype.hasOwnProperty.call(nextConfig, "healConfirmMs")) {
-      nextConfig.healConfirmMs = Math.max(50, Number(nextConfig.healConfirmMs) || 50);
+      nextConfig.healConfirmMs = Math.max(500, Number(nextConfig.healConfirmMs) || 500);
     }
 
     Object.assign(config, nextConfig);
@@ -2737,6 +2794,8 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
     lastTargetHotkeyAt: 0,
     lastRuneHotkeyAt: 0,
     engagedTargetId: null,
+    targetMissingSince: 0,
+    lastEngagedSeenAt: 0,
     nearerTargetId: null,
     nearerTargetSince: 0,
     combatStartedAt: 0,
@@ -2883,6 +2942,8 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
 
   function clearEngagedTarget() {
     state.engagedTargetId = null;
+    state.targetMissingSince = 0;
+    state.lastEngagedSeenAt = 0;
     state.nearerTargetId = null;
     state.nearerTargetSince = 0;
     state.combatStartedAt = 0;
@@ -2958,6 +3019,8 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
     const currentTarget = getCurrentTarget();
     if (currentTarget) {
       state.engagedTargetId = currentTarget.id;
+      state.lastEngagedSeenAt = Date.now();
+      state.targetMissingSince = 0;
       return currentTarget;
     }
 
@@ -2965,14 +3028,17 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
       return null;
     }
 
-    const followTarget = getCurrentFollowTarget();
-    if (followTarget && followTarget.id === state.engagedTargetId) {
-      return findNearbyMonster(followTarget) || followTarget;
-    }
-
+    // A FollowPacket can outlive the creature. Prioritize live/visible mobs.
     const nearbyTarget = findNearbyMonsterById(state.engagedTargetId);
     if (nearbyTarget) {
+      state.lastEngagedSeenAt = Date.now();
       return nearbyTarget;
+    }
+
+    const followTarget = getCurrentFollowTarget();
+    if (followTarget && followTarget.id === state.engagedTargetId &&
+        Date.now() - state.lastEngagedSeenAt < 1500) {
+      return followTarget;
     }
 
     clearEngagedTarget();
@@ -2988,15 +3054,17 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
       return false;
     }
 
-    // Never send TargetPacket again for a creature we are already fighting.
-    // The client can briefly report __target=null between game updates.
-    if (isSameCreature(getCurrentTarget(), target) || state.engagedTargetId === target.id) {
+    // No duplicate packets while the client still has this target.
+    // Recovery of a lost target is separately debounced by canAttack().
+    if (isSameCreature(getCurrentTarget(), target)) {
       return false;
     }
 
     window.gameClient.player.setTarget(target);
     window.gameClient.send(new TargetPacket(target.id));
     state.engagedTargetId = target.id;
+    state.targetMissingSince = 0;
+    state.lastEngagedSeenAt = Date.now();
     state.nearerTargetId = null;
     state.nearerTargetSince = 0;
     resetFollowProgress();
@@ -3101,7 +3169,7 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
     }
 
     // Ignore short-lived changes from animation/pathfinding to avoid thrashing.
-    if (now - state.nearerTargetSince < 1000) {
+    if (now - state.nearerTargetSince < 300) {
       return engaged;
     }
     return nearest;
@@ -3287,17 +3355,51 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
   }
 
   function canAttack(now = Date.now()) {
+    if (config.meleeMode) {
+      // Melee selects via TargetPacket, never by pressing the hotbar.
+      const wanted = getPreferredMeleeTarget(now);
+      if (!wanted) {
+        state.targetMissingSince = 0;
+        return false;
+      }
+
+      const current = getCurrentTarget();
+      if (isSameCreature(current, wanted)) {
+        state.targetMissingSince = 0;
+        return false;
+      }
+
+      const switchingCreature = state.engagedTargetId != null &&
+        state.engagedTargetId !== wanted.id;
+      const targetSelectionCooldownMs = switchingCreature
+        ? 700
+        : Math.max(0, Number(config.targetCooldownMs) || 0);
+      if (now - state.lastTargetHotkeyAt < targetSelectionCooldownMs) {
+        return false;
+      }
+
+      // The previous patch blocked the same ID forever, even when the game
+      // had stopped attacking it. Ignore brief nulls, then re-acquire slowly.
+      if (!current && state.engagedTargetId === wanted.id) {
+        if (!state.targetMissingSince) {
+          state.targetMissingSince = now;
+          return false;
+        }
+        if (now - state.targetMissingSince < 1500) {
+          return false;
+        }
+        if (now - state.lastTargetHotkeyAt < Math.max(2500, Number(config.targetCooldownMs) || 0)) {
+          return false;
+        }
+      } else {
+        state.targetMissingSince = 0;
+      }
+      return true;
+    }
+
     if (now - state.lastTargetHotkeyAt < Math.max(0, Number(config.targetCooldownMs) || 0)) {
       return false;
     }
-
-    if (config.meleeMode) {
-      // Melee selects directly via TargetPacket, not by pressing the hotbar.
-      const wanted = getPreferredMeleeTarget(now);
-      return !!wanted && !isSameCreature(getCurrentTarget(), wanted)
-        && state.engagedTargetId !== wanted.id;
-    }
-
     const slot = normalizeHotbarSlot(config.targetHotbarSlot);
     return !!slot && getNearbyMonsters().length > 0;
   }
@@ -3388,10 +3490,11 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
     syncCombatState(now);
 
     if (config.meleeMode) {
+      // Choose the actual nearest target BEFORE issuing FollowPacket, so the
+      // movement command does not keep chasing the previous farther target.
+      const selected = triggerAttack(now);
       const chased = syncMeleeChase(now);
-      // Allow a genuine closer monster to replace the target, but never
-      // re-send TargetPacket for the same creature after a transient null.
-      return triggerAttack(now) || chased;
+      return selected || chased;
     }
 
     if (getCurrentTarget()) {
