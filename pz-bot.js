@@ -3425,10 +3425,18 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
     // Never chase a remembered target that the client is no longer attacking.
     if (!isSameCreature(getCurrentTarget(), target)) return false;
 
-    // Undo an earlier bot/client green follow on this monster once. We do not
-    // set green follow again; attacking stays on the red TargetPacket.
-    if (isSameCreature(getCurrentFollowTarget(), target)) {
-      clearCurrentFollowTarget();
+    // The user may have enabled Minibia's native Safe/Aggressive Chase or
+    // explicitly selected a green Follow target. Never clear their follow,
+    // and never issue bot pathfinding while that movement mode is in control.
+    // Minibia's Pathfinder.findPath(..., true) calls resetChaseOnManualMove(),
+    // which turns Safe Chase OFF; this was the actual cause of the lost toggle.
+    const manualFollow = getCurrentFollowTarget();
+    const nativeChaseMode = Number(window.gameClient?.interface?.fightModeSelector?.currentChaseMode) || 0;
+    if (manualFollow || nativeChaseMode === 1 || nativeChaseMode === 2) {
+      // Yield movement ownership to the game's native chase/follow.
+      // Only cancel an autowalk that THIS module previously created.
+      cancelPreviousMeleeChase();
+      return false;
     }
 
     const playerPosition = normalizePosition(bot.getPlayerPosition());
@@ -3679,7 +3687,7 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
 
     clearEngagedTarget();
     state.lastChaseAt = 0;
-    clearCurrentFollowTarget();
+    // Never cancel a Follow target chosen manually by the player.
     state.skippedTargetIds.clear();
 
     bot.log("auto attack stopped");
@@ -5376,10 +5384,18 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
       // unreachable spot briefly rather than pausing forever.
       const yielded = now < state.combatYieldUntil &&
         (noTarget || (attackStatus?.config?.meleeMode === true && targetDistance > 2));
-      const shouldPauseForCombat = priorityEnabled
+      // Waypoint findPath() is deliberately interpreted by the Minibia client
+      // as a manual map click and disables Safe Chase while a target exists.
+      // If the player has explicitly activated native chase/follow, Cave Bot
+      // must not compete for movement until the current fight has ended.
+      const nativeChaseMode = Number(window.gameClient?.interface?.fightModeSelector?.currentChaseMode) || 0;
+      const nativeFollow = !!window.gameClient?.player?.__followTarget;
+      const nativeMovementOwnsCombat = !!attackStatus?.running && !!attackStatus?.currentTarget &&
+        (nativeFollow || nativeChaseMode === 1 || nativeChaseMode === 2);
+      const shouldPauseForCombat = nativeMovementOwnsCombat || (priorityEnabled
         ? !yielded && (monstersInRange || (state.pausedForCombat && now - state.lastPriorityMonsterSeenAt < 900))
         : !!attackStatus?.combatActive &&
-          Number(attackStatus?.combatDurationMs || 0) < 60000;
+          Number(attackStatus?.combatDurationMs || 0) < 60000);
 
       if (shouldPauseForCombat) {
         if (!state.pausedForCombat) {

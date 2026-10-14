@@ -1611,10 +1611,18 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
       // unreachable spot briefly rather than pausing forever.
       const yielded = now < state.combatYieldUntil &&
         (noTarget || (attackStatus?.config?.meleeMode === true && targetDistance > 2));
-      const shouldPauseForCombat = priorityEnabled
+      // Waypoint findPath() is deliberately interpreted by the Minibia client
+      // as a manual map click and disables Safe Chase while a target exists.
+      // If the player has explicitly activated native chase/follow, Cave Bot
+      // must not compete for movement until the current fight has ended.
+      const nativeChaseMode = Number(window.gameClient?.interface?.fightModeSelector?.currentChaseMode) || 0;
+      const nativeFollow = !!window.gameClient?.player?.__followTarget;
+      const nativeMovementOwnsCombat = !!attackStatus?.running && !!attackStatus?.currentTarget &&
+        (nativeFollow || nativeChaseMode === 1 || nativeChaseMode === 2);
+      const shouldPauseForCombat = nativeMovementOwnsCombat || (priorityEnabled
         ? !yielded && (monstersInRange || (state.pausedForCombat && now - state.lastPriorityMonsterSeenAt < 900))
         : !!attackStatus?.combatActive &&
-          Number(attackStatus?.combatDurationMs || 0) < 60000;
+          Number(attackStatus?.combatDurationMs || 0) < 60000);
 
       if (shouldPauseForCombat) {
         if (!state.pausedForCombat) {
