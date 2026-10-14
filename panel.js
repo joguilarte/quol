@@ -3,6 +3,7 @@ window.__minibiaBotBundle = window.__minibiaBotBundle || {};
 window.__minibiaBotBundle.installPanel = function installPanel(bot) {
   const panelPositionKey = "minibiaBot.ui.panelPosition";
   const panelCollapsedKey = "minibiaBot.ui.panelCollapsed";
+  const panelSizeKey = "minibiaBot.ui.panelSize";
 
   function destroy() {
     document.getElementById("minibia-bot-panel")?.remove();
@@ -506,6 +507,108 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     savePanelCollapsed(nextCollapsed);
   }
 
+  function panelDimensionLimits() {
+    return {
+      maxWidth: Math.max(220, window.innerWidth - 24),
+      maxHeight: Math.max(160, window.innerHeight - 24),
+    };
+  }
+
+  function clampPanelSize(width, height) {
+    const { maxWidth, maxHeight } = panelDimensionLimits();
+    return {
+      width: Math.max(Math.min(330, maxWidth), Math.min(Number(width) || 0, maxWidth)),
+      height: Math.max(Math.min(240, maxHeight), Math.min(Number(height) || 0, maxHeight)),
+    };
+  }
+
+  function applySavedPanelSize(panel) {
+    const size = bot.storage.get(panelSizeKey, null);
+    if (!size || !Number.isFinite(size.width) || !Number.isFinite(size.height)) return;
+    const fitted = clampPanelSize(size.width, size.height);
+    panel.style.width = `${fitted.width}px`;
+    panel.style.height = `${fitted.height}px`;
+  }
+
+  function enablePanelResize(panel) {
+    const grip = panel.querySelector("#minibia-bot-resize");
+    const reset = panel.querySelector("#minibia-bot-reset-size");
+    if (!grip) return;
+    let resizing = null;
+
+    const onMove = (event) => {
+      if (!resizing) return;
+      const limits = panelDimensionLimits();
+      const maxWidth = Math.min(limits.maxWidth, window.innerWidth - resizing.left - 8);
+      const maxHeight = Math.min(limits.maxHeight, window.innerHeight - resizing.top - 8);
+      const size = clampPanelSize(
+        resizing.width + event.clientX - resizing.x,
+        resizing.height + event.clientY - resizing.y
+      );
+      panel.style.width = `${Math.min(maxWidth, size.width)}px`;
+      panel.style.height = `${Math.min(maxHeight, size.height)}px`;
+    };
+    const onUp = () => {
+      if (!resizing) return;
+      resizing = null;
+      bot.storage.set(panelSizeKey, {
+        width: panel.getBoundingClientRect().width,
+        height: panel.getBoundingClientRect().height,
+      });
+    };
+
+    grip.addEventListener("pointerdown", (event) => {
+      if (event.button !== 0 || panel.dataset.collapsed === "true") return;
+      const rect = panel.getBoundingClientRect();
+      // Switch from a right-anchored panel to absolute left/top for predictable resizing.
+      panel.style.left = `${rect.left}px`;
+      panel.style.top = `${rect.top}px`;
+      panel.style.right = "auto";
+      resizing = {
+        x: event.clientX, y: event.clientY,
+        left: rect.left, top: rect.top,
+        width: rect.width, height: rect.height,
+      };
+      event.preventDefault();
+      event.stopPropagation();
+    });
+
+    reset?.addEventListener("click", () => {
+      const { maxWidth, maxHeight } = panelDimensionLimits();
+      panel.style.width = `${Math.min(1180, maxWidth)}px`;
+      panel.style.height = `${Math.min(790, maxHeight)}px`;
+      panel.style.top = "12px";
+      panel.style.left = "auto";
+      panel.style.right = "12px";
+      bot.storage.set(panelSizeKey, null);
+      bot.storage.set(panelPositionKey, null);
+      panel.querySelector(".mb-body")?.scrollTo({ top: 0 });
+    });
+
+    const onViewportResize = () => {
+      if (panel.dataset.collapsed !== "true") {
+        const { maxWidth, maxHeight } = panelDimensionLimits();
+        if (panel.getBoundingClientRect().width > maxWidth) panel.style.width = `${maxWidth}px`;
+        if (panel.getBoundingClientRect().height > maxHeight) panel.style.height = `${maxHeight}px`;
+      }
+      if (panel.style.left && panel.style.left !== "auto") {
+        const rect = panel.getBoundingClientRect();
+        const next = clampPanelPosition(panel, rect.left, rect.top);
+        panel.style.left = `${next.left}px`;
+        panel.style.top = `${next.top}px`;
+      }
+    };
+
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("resize", onViewportResize);
+    bot.addCleanup(() => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("resize", onViewportResize);
+    });
+  }
+
   function applySavedPanelPosition(panel, key = panelPositionKey) {
     const position = getSavedPanelPosition(key);
     if (!position) return;
@@ -588,25 +691,65 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
       #minibia-bot-panel {
         position: fixed;
         z-index: 999999;
-        max-width: calc(100vw - 32px);
+        box-sizing: border-box;
+        max-width: calc(100vw - 24px);
+        max-height: calc(100vh - 24px);
+        min-width: min(330px, calc(100vw - 24px));
+        min-height: min(240px, calc(100vh - 24px));
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+        container-type: inline-size;
         padding: 12px;
         border: 1px solid rgba(224, 200, 148, 0.45);
         border-radius: 10px;
         background: linear-gradient(180deg, rgba(30, 23, 15, 0.95), rgba(15, 11, 8, 0.97));
         box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
         color: #f1e2b8;
-        font: 12px/1.35 Verdana, sans-serif;
+        font: 14px/1.45 Verdana, sans-serif;
         user-select: none;
       }
 
       #minibia-bot-panel {
-        top: 16px;
-        right: 16px;
-        width: 960px;
+        top: 12px;
+        right: 12px;
+        width: min(1180px, calc(100vw - 24px));
+        height: min(790px, calc(100vh - 24px));
       }
 
       #minibia-bot-panel[data-collapsed="true"] {
-        width: 220px;
+        width: 220px !important;
+        height: auto !important;
+        min-height: 0;
+      }
+
+      #minibia-bot-panel .mb-title-actions {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+      }
+
+      #minibia-bot-panel .mb-resize-handle {
+        position: absolute;
+        right: 3px;
+        bottom: 3px;
+        height: 22px;
+        width: 22px;
+        border-radius: 4px;
+        cursor: nwse-resize;
+        touch-action: none;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 18px;
+        line-height: 1;
+        color: #d3c49d;
+        background: rgba(30, 23, 15, 0.92);
+        z-index: 2;
+      }
+      #minibia-bot-panel[data-collapsed="true"] .mb-resize-handle,
+      #minibia-bot-panel[data-collapsed="true"] #minibia-bot-reset-size {
+        display: none;
       }
 
       #minibia-bot-panel .mb-title {
@@ -618,6 +761,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
       }
 
       #minibia-bot-panel .mb-titlebar {
+        flex: 0 0 auto;
         display: flex;
         align-items: center;
         justify-content: space-between;
@@ -639,10 +783,24 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
       }
 
       #minibia-bot-panel .mb-body {
+        flex: 1 1 auto;
+        min-height: 0;
+        overflow-y: auto;
+        overflow-x: hidden;
+        overscroll-behavior: contain;
+        scrollbar-width: thin;
+        scrollbar-color: rgba(224,200,148,0.5) transparent;
+        padding: 2px 10px 24px 0;
         display: grid;
-        grid-template-columns: minmax(0, 1fr) 280px 240px;
-        gap: 12px;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
         align-items: start;
+        align-content: start;
+        gap: 16px;
+      }
+      #minibia-bot-panel .mb-body::-webkit-scrollbar { width: 9px; }
+      #minibia-bot-panel .mb-body::-webkit-scrollbar-thumb {
+        border-radius: 6px;
+        background: rgba(224,200,148,0.45);
       }
 
       #minibia-bot-panel .mb-body[hidden] {
@@ -652,6 +810,8 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
       #minibia-bot-panel .mb-side-column,
       #minibia-bot-panel .mb-main-column,
       #minibia-bot-panel .mb-cave-column {
+        min-width: 0;
+        align-content: start;
         display: grid;
         gap: 10px;
       }
@@ -790,7 +950,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
 
       #minibia-bot-panel .mb-field-label {
         color: #d3c49d;
-        font-size: 11px;
+        font-size: 12px;
       }
 
       #minibia-bot-panel .mb-stack {
@@ -833,7 +993,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
       #minibia-bot-panel .mb-floor-label {
         margin-top: 4px;
         color: #e2cf9c;
-        font-size: 11px;
+        font-size: 12px;
         font-weight: 700;
         letter-spacing: 0.04em;
         text-transform: uppercase;
@@ -859,26 +1019,31 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
 
       #minibia-bot-panel .mb-small-note {
         color: #b7a67d;
-        font-size: 11px;
+        font-size: 12px;
       }
 
       #minibia-bot-panel .mb-note {
         margin-top: 8px;
         color: #b7a67d;
-        font-size: 11px;
+        font-size: 12px;
       }
 
-      @media (max-width: 760px) {
-        #minibia-bot-panel {
-          width: min(720px, calc(100vw - 32px));
-        }
-
-        #minibia-bot-panel .mb-body {
-          grid-template-columns: 1fr;
-        }
-
-        #minibia-bot-panel .mb-field-grid {
-          grid-template-columns: 1fr;
+      /* The layout follows the panel width, not the browser window width. */
+      @container (max-width: 1060px) {
+        #minibia-bot-panel .mb-body { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        #minibia-bot-panel .mb-cave-column { grid-column: 1; grid-row: 1; }
+        #minibia-bot-panel .mb-side-column { grid-column: 2; grid-row: 1; }
+        #minibia-bot-panel .mb-main-column { grid-column: 1 / -1; grid-row: 2; }
+      }
+      @container (max-width: 850px) {
+        #minibia-bot-panel .mb-body { display: flex; flex-direction: column; }
+        #minibia-bot-panel .mb-body > div { width: 100%; }
+        #minibia-bot-panel .mb-cave-column { order: -2; }
+        #minibia-bot-panel .mb-side-column { order: -1; }
+      }
+      @media (max-width: 700px) {
+        #minibia-bot-panel .mb-row-five {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
         }
       }
     `;
@@ -889,7 +1054,10 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     panel.innerHTML = `
         <div class="mb-titlebar">
         <div class="mb-title">Minibia Bot</div>
-        <button type="button" class="mb-icon-button" id="minibia-bot-collapse" aria-label="Minimize panel" title="Minimize">−</button>
+        <div class="mb-title-actions">
+          <button type="button" class="mb-icon-button" id="minibia-bot-reset-size" aria-label="Reset panel size" title="Reset panel size">⤢</button>
+          <button type="button" class="mb-icon-button" id="minibia-bot-collapse" aria-label="Minimize panel" title="Minimize">−</button>
+        </div>
       </div>
       <div class="mb-body">
         <div class="mb-main-column">
@@ -1035,6 +1203,31 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
               <div class="mb-small-note">It will not reply to itself and will not admit it is a bot.</div>
             </div>
           </div>
+          <div class="mb-section mb-column-section">
+            <div class="mb-label">Move Floor Items</div>
+            <div class="mb-stack">
+              <label class="mb-toggle">
+                <input type="checkbox" id="minibia-bot-floor-move-enabled" />
+                <span>Move matching floor items</span>
+              </label>
+              <label class="mb-toggle">
+                <input type="checkbox" id="minibia-bot-floor-move-rares" />
+                <span>Include Rare (from Minibia Auto Loot)</span>
+              </label>
+              <label class="mb-toggle">
+                <input type="checkbox" id="minibia-bot-floor-move-walk" />
+                <span>Walk to matching items visible on screen</span>
+              </label>
+              <div class="mb-small-note">Open Minibia's Loot List once per session to load the server-defined Rare items; otherwise this filter waits without moving anything.</div>
+              <label class="mb-field" for="minibia-bot-floor-move-items">
+                <span class="mb-field-label">Exact names / item IDs (comma separated)</span>
+                <input type="text" id="minibia-bot-floor-move-items" placeholder="e.g. crystal coin, 3035" />
+              </label>
+              <button type="button" class="mb-small-button" id="minibia-bot-floor-move-scan">Scan visible tiles</button>
+              <div class="mb-small-note" id="minibia-bot-floor-move-status">Off</div>
+              <div class="mb-small-note">Scans on-screen tiles on the current floor. If walking is enabled, approaches safely and moves one matching item to a free adjacent tile; never picks it up. Combat takes precedence.</div>
+            </div>
+          </div>
         </div>
         <div class="mb-cave-column">
           <div class="mb-section mb-column-section">
@@ -1060,6 +1253,15 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
                 <span>Prioritize Monsters</span>
               </label>
               <div class="mb-small-note">When Auto Attack is active, pause waypoints while monsters are in targeting range. Melee Mode is needed to approach distant targets.</div>
+              <label class="mb-toggle">
+                <input type="checkbox" id="minibia-bot-cave-limit-chase" />
+                <span>Limit Melee Chase to Route</span>
+              </label>
+              <label class="mb-field" for="minibia-bot-cave-max-chase">
+                <span class="mb-field-label">Max distance from waypoint (tiles, 2-20)</span>
+                <input type="number" id="minibia-bot-cave-max-chase" min="2" max="20" step="1" value="6" />
+              </label>
+              <div class="mb-small-note">Only with Cave Bot running and Melee Mode on. Stop chasing beyond the radius and resume waypoints. Add intermediate waypoints along long corridors.</div>
               <label class="mb-toggle">
                 <input type="checkbox" id="minibia-bot-cave-verification-pause" />
                 <span>Pause waypoints on anti-bot notice</span>
@@ -1101,6 +1303,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
           </div>
         </div>
       </div>
+      <div class="mb-resize-handle" id="minibia-bot-resize" role="separator" aria-label="Resize Minibia Bot panel" title="Drag to resize">◢</div>
     `;
     document.body.appendChild(panel);
 
@@ -1116,8 +1319,10 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
       panel.removeEventListener("keydown", unlockAudio);
     });
 
+    applySavedPanelSize(panel);
     applySavedPanelPosition(panel);
     enableDrag(panel);
+    enablePanelResize(panel);
     setPanelCollapsed(panel, getSavedPanelCollapsed());
 
     const spellInput = panel.querySelector("#minibia-bot-rune-spell");
@@ -1137,6 +1342,12 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     const autoAttackMeleeInput = panel.querySelector("#minibia-bot-auto-attack-melee");
     const autoAttackHotkeyInput = panel.querySelector("#minibia-bot-auto-attack-hotkey");
     const autoAttackRuneHotkeyInput = panel.querySelector("#minibia-bot-auto-attack-rune-hotkey");
+    const floorMoveToggle = panel.querySelector("#minibia-bot-floor-move-enabled");
+    const floorMoveItems = panel.querySelector("#minibia-bot-floor-move-items");
+    const floorMoveRares = panel.querySelector("#minibia-bot-floor-move-rares");
+    const floorMoveWalk = panel.querySelector("#minibia-bot-floor-move-walk");
+    const floorMoveScan = panel.querySelector("#minibia-bot-floor-move-scan");
+    const floorMoveStatus = panel.querySelector("#minibia-bot-floor-move-status");
     const talkEnabledInput = panel.querySelector("#minibia-bot-talk-enabled");
     const talkNpcInput = panel.querySelector("#minibia-bot-talk-npc-replies");
     const talkApiKeyInput = panel.querySelector("#minibia-bot-talk-api-key");
@@ -1153,6 +1364,8 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     const collapseButton = panel.querySelector("#minibia-bot-collapse");
     const reloadButton = panel.querySelector("#minibia-bot-reload");
     const cavePrioritizeMonstersInput = panel.querySelector("#minibia-bot-cave-prioritize-monsters");
+    const caveLimitChaseInput = panel.querySelector("#minibia-bot-cave-limit-chase");
+    const caveMaxChaseInput = panel.querySelector("#minibia-bot-cave-max-chase");
     const caveVerificationPauseInput = panel.querySelector("#minibia-bot-cave-verification-pause");
     const caveVerificationTickInput = panel.querySelector("#minibia-bot-cave-verification-tick");
     const caveResumeVerificationButton = panel.querySelector("#minibia-bot-cave-resume-verification");
@@ -1350,6 +1563,23 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
       cavePrioritizeMonstersInput.addEventListener("change", () => {
         bot.cave.updateConfig({ prioritizeMonsters: cavePrioritizeMonstersInput.checked });
         refreshCaveStatus();
+      });
+    }
+
+    if (caveLimitChaseInput) {
+      caveLimitChaseInput.checked = bot.cave?.config?.limitChaseToRoute === true;
+      caveLimitChaseInput.addEventListener("change", () => {
+        bot.cave.updateConfig({ limitChaseToRoute: caveLimitChaseInput.checked });
+        refreshCaveStatus();
+      });
+    }
+
+    if (caveMaxChaseInput) {
+      caveMaxChaseInput.value = String(bot.cave?.config?.maxChaseFromRouteTiles ?? 6);
+      caveMaxChaseInput.addEventListener("change", () => {
+        const maxChaseFromRouteTiles = Math.max(2, Math.min(20, Math.trunc(Number(caveMaxChaseInput.value) || 6)));
+        caveMaxChaseInput.value = String(maxChaseFromRouteTiles);
+        bot.cave.updateConfig({ maxChaseFromRouteTiles });
       });
     }
 
@@ -1585,6 +1815,50 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
         }
 
         refreshAutoAttackStatus();
+      });
+    }
+
+    if (floorMoveToggle && floorMoveItems && floorMoveStatus) {
+      const floorStatus = bot.floorMove.status();
+      floorMoveItems.value = floorStatus.config.items || "";
+      floorMoveRares.checked = !!floorStatus.config.includeRares;
+      floorMoveWalk.checked = !!floorStatus.config.walkToVisible;
+      floorMoveToggle.checked = !!floorStatus.running;
+      floorMoveItems.addEventListener("change", () => {
+        bot.floorMove.updateConfig({items:floorMoveItems.value});
+      });
+      floorMoveWalk.addEventListener("change", () => {
+        bot.floorMove.updateConfig({walkToVisible:floorMoveWalk.checked});
+      });
+      floorMoveRares.addEventListener("change", () => {
+        bot.floorMove.updateConfig({includeRares:floorMoveRares.checked});
+        if (floorMoveToggle.checked) {
+          const status = bot.floorMove.status();
+          floorMoveStatus.textContent = status.config.includeRares && !status.rareCatalogReady ?
+            "Waiting for Loot List — open it once in Minibia" : "Active";
+        }
+      });
+      floorMoveToggle.addEventListener("change", () => {
+        bot.floorMove.updateConfig({items:floorMoveItems.value,includeRares:floorMoveRares.checked,walkToVisible:floorMoveWalk.checked});
+        if (floorMoveToggle.checked) {
+          if (!bot.floorMove.start()) {
+            floorMoveToggle.checked = false;
+            floorMoveStatus.textContent = "Select Rare or enter a name/ID";
+            return;
+          }
+        } else bot.floorMove.stop();
+        const status = bot.floorMove.status();
+        floorMoveStatus.textContent = !floorMoveToggle.checked ? "Off" :
+          (status.config.includeRares && !status.rareCatalogReady ?
+            "Waiting for Loot List — open it once in Minibia" : "Active");
+      });
+      floorMoveScan?.addEventListener("click", () => {
+        const nearby = bot.floorMove.scanNearby();
+        const status = bot.floorMove.status();
+        floorMoveStatus.textContent = (status.config.includeRares ?
+          (status.rareCatalogReady ? `Rare catalog: ${status.rareCount} IDs. ` : "Rare catalog not loaded. ") : "") +
+          (nearby.length ? nearby.slice(0,8).map(item => `${item.name || "unknown"} (#${item.id})`).join(", ") :
+            "No items visible on current floor");
       });
     }
 
