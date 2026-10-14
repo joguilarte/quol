@@ -274,6 +274,11 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
       return false;
     }
 
+    // When switching creatures, drop only an old melee chase destination.
+    // Otherwise an already queued walk can continue toward the old monster.
+    if (state.engagedTargetId != null && state.engagedTargetId !== target.id) {
+      cancelPreviousMeleeChase();
+    }
     window.gameClient.player.setTarget(target);
     window.gameClient.send(new TargetPacket(target.id));
     state.engagedTargetId = target.id;
@@ -349,9 +354,39 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
       });
   }
 
+  // Read-only query for Cave Bot. Only monsters that Auto Attack could
+  // actually select, on the same floor and within its configured range,
+  // are considered. This does not press keys or issue combat packets.
+  function hasPriorityMonsters(now = Date.now()) {
+    if (!state.running || !config.enabled) return false;
+    const playerPosition = normalizePosition(bot.getPlayerPosition());
+    if (!playerPosition) return false;
+    const maxDistance = Math.max(1, Number(config.maxTargetDistance) || 8);
+    return getMonsterCandidates(now).some((monster) => {
+      const position = normalizePosition(monster?.getPosition?.() || monster?.__position);
+      return getTileDistance(playerPosition, position) <= maxDistance;
+    });
+  }
+
+  // Only cancel an autowalk previously initiated by this module. Do not
+  // interrupt a Cave Bot waypoint or an unrelated player move.
+  function cancelPreviousMeleeChase() {
+    const pathfinder = window.gameClient?.world?.pathfinder;
+    const destination = normalizePosition(pathfinder?.__finalDestination);
+    if (!pathfinder || !destination ||
+        getPositionKey(destination) !== state.lastChaseDestinationKey ||
+        typeof pathfinder.setPathfindCache !== "function") {
+      return false;
+    }
+    pathfinder.setPathfindCache(null);
+    state.lastChaseDestinationKey = null;
+    state.lastChaseAt = 0;
+    return true;
+  }
+
   // Prefer the active monster and switch only when another is strictly closer
   // for a stable period. No duplicate selection of the same creature ID.
-  function getPreferredMeleeTarget(now = Date.now()) {
+  function getPreferredTarget(now = Date.now()) {
     const candidates = getMonsterCandidates(now);
     const engaged = getEngagedTarget();
     if (!engaged || isTargetSkipped(engaged, now)) {
@@ -494,10 +529,10 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
     return null;
   }
 
+  // Movement in melee is client pathfinding, never FollowPacket: follow (green)
+  // can displace the server's attack target on this Minibia client.
   function syncMeleeChase(now = Date.now()) {
-    if (!config.meleeMode) {
-      return false;
-    }
+    if (!config.meleeMode) return false;
 
     const target = getEngagedTarget();
     if (!target) {
@@ -505,158 +540,120 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
       return false;
     }
 
-    const playerPosition = normalizePosition(bot.getPlayerPosition());
-    const targetPosition = normalizePosition(target.getPosition?.() || target.__position);
-    if (!playerPosition || !targetPosition || playerPosition.z !== targetPosition.z) {
-      return false;
+    // Never chase a remembered target that the client is no longer attacking.
+    if (!isSameCreature(getCurrentTarget(), target)) return false;
+
+    // Undo an earlier bot/client green follow on this monster once. We do not
+    // set green follow again; attacking stays on the red TargetPacket.
+    if (isSameCreature(getCurrentFollowTarget(), target)) {
+      clearCurrentFollowTarget();
     }
 
-    const giveUpDelayMs = Math.max(5000, (Number(config.tickMs) || 0) * 10);
+    const playerPosition = normalizePosition(bot.getPlayerPosition());
+    const targetPosition = normalizePosition(target.getPosition?.() || target.__position);
+    if (!playerPosition || !targetPosition || playerPosition.z !== targetPosition.z) return false;
 
+    const giveUpDelayMs = Math.max(5000, (Number(config.tickMs) || 0) * 10);
     if (isAdjacentTile(playerPosition, targetPosition)) {
       state.lastChaseDestinationKey = null;
-      clearCurrentFollowTarget();
       resetFollowProgress();
       return false;
     }
 
     const adjacentPosition = findReachableAdjacentPosition(targetPosition, playerPosition);
     if (!adjacentPosition) {
-      if (!state.lastFollowStallAt) {
-        state.lastFollowStallAt = now;
-        return false;
-      }
-
-      if (now - state.lastFollowStallAt > giveUpDelayMs) {
+      if (!state.lastFollowStallAt) state.lastFollowStallAt = now;
+      else if (now - state.lastFollowStallAt > giveUpDelayMs)
         return skipTarget(target, "no reachable adjacent tile", now);
-      }
-
       return false;
     }
 
-    const currentDistance = getTileDistance(playerPosition, targetPosition);
-    if (state.lastFollowTargetId !== target.id) {
+    const distance = getTileDistance(playerPosition, targetPosition);
+    if (state.lastFollowTargetId !== target.id || distance < state.lastFollowDistance) {
       state.lastFollowTargetId = target.id;
-      state.lastFollowDistance = currentDistance;
+      state.lastFollowDistance = distance;
       state.lastFollowProgressAt = now;
       state.lastFollowStallAt = 0;
-    } else if (currentDistance < state.lastFollowDistance) {
-      state.lastFollowDistance = currentDistance;
-      state.lastFollowProgressAt = now;
-      state.lastFollowStallAt = 0;
+    } else if (!state.lastFollowStallAt) {
+      state.lastFollowStallAt = now;
+    } else if (now - state.lastFollowStallAt > giveUpDelayMs) {
+      return skipTarget(target, "path made no progress", now);
     }
 
-    const followed = setCurrentFollowTarget(target);
-    if (followed) {
+    const destinationKey = getPositionKey(adjacentPosition);
+    // Avoid constantly cancelling/re-sending autowalk. Repath only for a
+    // changed destination or at a measured interval if still distant.
+    if (destinationKey === state.lastChaseDestinationKey && now - state.lastChaseAt < 1200)
+      return false;
+
+    const pathfinder = window.gameClient?.world?.pathfinder;
+    if (!pathfinder || typeof pathfinder.findPath !== "function" || typeof Position !== "function")
+      return false;
+
+    try {
+      pathfinder.findPath(
+        new Position(playerPosition.x, playerPosition.y, playerPosition.z),
+        new Position(adjacentPosition.x, adjacentPosition.y, adjacentPosition.z)
+      );
       state.lastChaseAt = now;
-      state.lastChaseDestinationKey = getPositionKey(adjacentPosition);
-      bot.log("following auto attack target", {
-        id: target.id,
-        name: target.name || "Mob",
-        followTargetId: target.id,
-      });
+      state.lastChaseDestinationKey = destinationKey;
+      return true;
+    } catch (error) {
+      bot.log("melee pathfind failed", error?.message || error);
+      return false;
     }
-
-    if (state.lastFollowDistance <= currentDistance) {
-      if (!state.lastFollowStallAt) {
-        state.lastFollowStallAt = now;
-      } else if (now - state.lastFollowStallAt > giveUpDelayMs) {
-        return skipTarget(target, "follow made no progress", now);
-      }
-    }
-
-    return followed;
   }
 
+  // Both modes acquire the nearest monster through TargetPacket. The only
+  // difference is whether the bot performs movement to melee range.
   function canAttack(now = Date.now()) {
-    if (config.meleeMode) {
-      // Melee selects via TargetPacket, never by pressing the hotbar.
-      const wanted = getPreferredMeleeTarget(now);
-      if (!wanted) {
-        state.targetMissingSince = 0;
+    const wanted = getPreferredTarget(now);
+    if (!wanted) {
+      state.targetMissingSince = 0;
+      return false;
+    }
+
+    const current = getCurrentTarget();
+    if (isSameCreature(current, wanted)) {
+      state.targetMissingSince = 0;
+      return false;
+    }
+
+    // Wait a single brief observation if the client dropped the SAME target;
+    // never stall 2.5 seconds as the previous version did. TargetPacket still
+    // goes only when the client has no target or a DIFFERENT target.
+    if (!current && state.engagedTargetId === wanted.id) {
+      if (!state.targetMissingSince) {
+        state.targetMissingSince = now;
         return false;
       }
-
-      const current = getCurrentTarget();
-      if (isSameCreature(current, wanted)) {
-        state.targetMissingSince = 0;
-        return false;
-      }
-
-      const switchingCreature = state.engagedTargetId != null &&
-        state.engagedTargetId !== wanted.id;
-      const targetSelectionCooldownMs = switchingCreature
-        ? 700
-        : Math.max(0, Number(config.targetCooldownMs) || 0);
-      if (now - state.lastTargetHotkeyAt < targetSelectionCooldownMs) {
-        return false;
-      }
-
-      // The previous patch blocked the same ID forever, even when the game
-      // had stopped attacking it. Ignore brief nulls, then re-acquire slowly.
-      if (!current && state.engagedTargetId === wanted.id) {
-        if (!state.targetMissingSince) {
-          state.targetMissingSince = now;
-          return false;
-        }
-        if (now - state.targetMissingSince < 1500) {
-          return false;
-        }
-        if (now - state.lastTargetHotkeyAt < Math.max(2500, Number(config.targetCooldownMs) || 0)) {
-          return false;
-        }
-      } else {
-        state.targetMissingSince = 0;
-      }
+      if (now - state.targetMissingSince < 300) return false;
+      if (now - state.lastTargetHotkeyAt < 900) return false;
       return true;
     }
 
-    if (now - state.lastTargetHotkeyAt < Math.max(0, Number(config.targetCooldownMs) || 0)) {
-      return false;
-    }
-    const slot = normalizeHotbarSlot(config.targetHotbarSlot);
-    return !!slot && getNearbyMonsters().length > 0;
+    state.targetMissingSince = 0;
+    const switching = state.engagedTargetId != null && state.engagedTargetId !== wanted.id;
+    const cooldownMs = switching ? 700 : Math.max(0, Number(config.targetCooldownMs) || 0);
+    return now - state.lastTargetHotkeyAt >= cooldownMs;
   }
 
   function triggerAttack(now = Date.now()) {
-    if (!canAttack(now)) {
-      return false;
-    }
+    if (!canAttack(now)) return false;
 
-    const engagedTarget = getEngagedTarget();
-    const preferredTarget = config.meleeMode
-      ? getPreferredMeleeTarget(now)
-      : (engagedTarget && !isTargetSkipped(engagedTarget, now)
-        ? engagedTarget
-        : (getMonsterCandidates(now)[0] || null));
-    if (preferredTarget && setCurrentTarget(preferredTarget)) {
-      state.lastTargetHotkeyAt = now;
-      markCombatActive(now);
-      bot.log("selected auto attack target", {
-        id: preferredTarget.id,
-        name: preferredTarget.name || "Mob",
-        reason: isSameCreature(preferredTarget, engagedTarget) ? "engaged target" : "nearest candidate",
-      });
-      return true;
-    }
+    const previous = getCurrentTarget();
+    const preferred = getPreferredTarget(now);
+    if (!preferred || !setCurrentTarget(preferred)) return false;
 
-    if (config.meleeMode) {
-      return false;
-    }
-
-    const slot = normalizeHotbarSlot(config.targetHotbarSlot);
-    const clicked = bot.clickHotbar(slot - 1);
-    if (clicked) {
-      const monsters = getNearbyMonsters();
-      state.lastTargetHotkeyAt = now;
-      markCombatActive(now);
-      bot.log("used auto attack target hotkey", {
-        slot,
-        nearbyMonsters: monsters.map((creature) => creature.name || "Mob"),
-      });
-    }
-
-    return clicked;
+    state.lastTargetHotkeyAt = now;
+    markCombatActive(now);
+    bot.log("selected auto attack target", {
+      id: preferred.id,
+      name: preferred.name || "Mob",
+      reason: previous ? "closer creature" : "nearest or recovered creature",
+      meleeMode: !!config.meleeMode,
+    });
+    return true;
   }
 
   function canUseRune(now = Date.now()) {
@@ -692,30 +689,23 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
   }
 
   function tryAttack() {
-    if (!config.enabled) {
-      return false;
-    }
+    if (!config.enabled) return false;
 
     const now = Date.now();
-    if (resetTargetIfTooFar()) {
-      return true;
-    }
+    if (resetTargetIfTooFar()) return true;
 
     syncCombatState(now);
-
+    // Select (or switch) first. This also runs when melee is disabled;
+    // it never presses a native "attack nearest" hotkey that could toggle off.
+    const selected = triggerAttack(now);
     if (config.meleeMode) {
-      // Choose the actual nearest target BEFORE issuing FollowPacket, so the
-      // movement command does not keep chasing the previous farther target.
-      const selected = triggerAttack(now);
       const chased = syncMeleeChase(now);
       return selected || chased;
     }
 
-    if (getCurrentTarget()) {
-      return triggerRune(now);
-    }
-
-    return triggerAttack(now);
+    // No automatic movement with Melee Mode off; player controls follow/walk.
+    const runeUsed = triggerRune(now);
+    return selected || runeUsed;
   }
 
   function scheduleNextTick() {
@@ -844,6 +834,7 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
     canUseRune,
     triggerRune,
     getNearbyMonsters,
+    hasPriorityMonsters,
     getCurrentTarget,
     getCurrentFollowTarget,
     isCombatActive,
