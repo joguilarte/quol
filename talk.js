@@ -2,8 +2,8 @@ window.__minibiaBotBundle = window.__minibiaBotBundle || {};
 
 window.__minibiaBotBundle.installTalkModule = function installTalkModule(bot) {
   const configStorageKey = "minibiaBot.talk.config";
-  const legacyDefaultModels = ["gemini-3-pro-preview", "gemini-2.0-flash"];
-  const defaultModel = "gemini-2.5-flash-lite";
+  const legacyDefaultModels = ["gemini-3-pro-preview", "gemini-2.0-flash", "gemini-2.5-flash-lite"];
+  const defaultModel = "gemini-3.5-flash-lite";
   const defaultSystemPrompt =
     "You are a normal Tibia MMORPG player chatting in Minibia in live in-game chat. Every reply must sound like Tibia player chat: casual, brief, informal, fully lowercase, and natural for a real player typing quickly. Use plain text only. Keep it under 90 characters and under 12 words. Prefer short Tibia-style phrasing, light slang, abbreviations, and simple punctuation when natural. Avoid polished grammar, title case, or assistant-like wording. Write like someone typing mid-hunt or while afk for a sec. Never say you are a bot or AI.";
   const defaultGreetingPrompt =
@@ -741,6 +741,20 @@ window.__minibiaBotBundle.installTalkModule = function installTalkModule(bot) {
     return true;
   }
 
+  // Generate a real API preview without sending a message to Minibia chat.
+  async function previewReply(message) {
+    const body = String(message || "").trim().slice(0, 240);
+    if (!body) throw new Error("Enter a message to simulate.");
+    const sample = { sender: "TestPlayer", body };
+    if (config.replyMode === "rules") return sanitizeReply(findRuleReply(body));
+    if (!config.apiKey) throw new Error("Gemini API key missing. Configure it in Talk.");
+    const type = isGreeting(body) ? "greeting" : /[?¿]/.test(body) ? "question" : "statement";
+    const reply = await generateText(buildReplyPrompt(sample, [sample], type), {
+      temperature: 0.8, maxOutputTokens: 100,
+    });
+    return sanitizeReply(reply);
+  }
+
   function status() {
     return {
       running: state.running,
@@ -775,6 +789,7 @@ window.__minibiaBotBundle.installTalkModule = function installTalkModule(bot) {
     status,
     updateConfig,
     getChatMessages,
+    previewReply,
     config,
   };
 };

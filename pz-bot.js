@@ -7395,6 +7395,20 @@ window.__minibiaBotBundle.installTalkModule = function installTalkModule(bot) {
     return true;
   }
 
+  // Generate a real API preview without sending a message to Minibia chat.
+  async function previewReply(message) {
+    const body = String(message || "").trim().slice(0, 240);
+    if (!body) throw new Error("Enter a message to simulate.");
+    const sample = { sender: "TestPlayer", body };
+    if (config.replyMode === "rules") return sanitizeReply(findRuleReply(body));
+    if (!config.apiKey) throw new Error("Gemini API key missing. Configure it in Talk.");
+    const type = isGreeting(body) ? "greeting" : /[?¿]/.test(body) ? "question" : "statement";
+    const reply = await generateText(buildReplyPrompt(sample, [sample], type), {
+      temperature: 0.8, maxOutputTokens: 100,
+    });
+    return sanitizeReply(reply);
+  }
+
   function status() {
     return {
       running: state.running,
@@ -7429,6 +7443,7 @@ window.__minibiaBotBundle.installTalkModule = function installTalkModule(bot) {
     status,
     updateConfig,
     getChatMessages,
+    previewReply,
     config,
   };
 };
@@ -8135,6 +8150,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
   const panelPositionKey = "minibiaBot.ui.panelPosition";
   const panelCollapsedKey = "minibiaBot.ui.panelCollapsed";
   const panelSizeKey = "minibiaBot.ui.panelSize";
+  const emergencyPositionKey = "minibiaBot.ui.emergencyPosition";
 
   function destroy() {
     document.getElementById("minibia-bot-panel")?.remove();
@@ -9185,17 +9201,40 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     `;
     style.textContent += `
       #minibia-bot-panel .mb-quick-bar { grid-column: 1 / -1; grid-row: auto; padding: 12px; border: 1px solid #b09253; border-radius: 10px; background: rgba(73,55,31,.65); display:grid; gap:7px; }
-      #minibia-bot-panel .mb-quick-bar label { display:grid; gap:4px; }
-      #minibia-bot-panel .mb-quick-actions { display:grid; grid-template-columns: 1fr 1fr; gap:8px; }
-      #minibia-bot-panel .mb-quick-actions button { font-weight:bold; }
+      #minibia-bot-panel .mb-quick-bar .mb-quick-route { display:grid; gap:4px; }
+      #minibia-bot-panel .mb-quick-head { display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap; }
+      #minibia-bot-panel .mb-quick-hint { color:#cdb88c; font-size:12px; }
+      #minibia-bot-panel .mb-quick-settings { display:flex; align-items:center; flex-wrap:wrap; gap:8px 20px; }
+      #minibia-bot-panel .mb-quick-settings .mb-toggle { display:flex; align-items:center; gap:8px; white-space:normal; }
+      #minibia-bot-panel .mb-quick-settings input[type=checkbox] { appearance:auto; width:17px; height:17px; min-width:17px; margin:0; accent-color:#d4ac58; }
+      #minibia-bot-panel .mb-quick-actions { display:flex; flex-wrap:wrap; gap:8px; }
+      #minibia-bot-panel .mb-quick-actions button { width:auto; min-width:128px; padding:7px 16px; font-weight:bold; }
+      #minibia-bot-panel .mb-quick-summary { padding:6px 9px; background:rgba(13,10,7,.45); border-radius:6px; font-size:12px; color:#e5d5ac; }
+      #minibia-bot-panel .mb-gemini-preview { white-space:pre-wrap; overflow-wrap:anywhere; padding:8px 10px; border-radius:6px; border:1px solid rgba(224,200,148,.2); background:rgba(15,12,8,.6); color:#e9d9b7; }
+      #minibia-bot-panel .mb-gemini-preview[hidden] { display:none; }
+      #minibia-bot-panel .mb-subfold { border:1px solid rgba(224,200,148,.16); border-radius:7px; padding:6px; margin:6px 0; }
+      #minibia-bot-panel .mb-subfold > summary { cursor:pointer; color:#ddc58d; font-weight:600; padding:4px; }
+      #minibia-bot-panel .mb-subfold[open] > summary { border-bottom:1px solid rgba(224,200,148,.12); margin-bottom:6px; }
+      #minibia-bot-panel .mb-subfold > .mb-section { border-top:0; padding-top:6px; }
+      #minibia-bot-panel .mb-monitor-intro { color:#b7a67d; font-size:12px; margin:0 3px 8px; }
       #minibia-bot-panel .mb-fold { min-width:0; border:1px solid rgba(224,200,148,.20); border-radius:8px; margin:0 0 7px; padding:7px; }
       #minibia-bot-panel .mb-fold summary { cursor:pointer; color:#e9d6a4; font-weight:700; padding:4px; }
       #minibia-bot-panel .mb-fold[open] summary { border-bottom:1px solid rgba(224,200,148,.18); margin-bottom:8px; }
       #minibia-bot-panel .mb-fold .mb-section { border:0; }
-      #minibia-bot-emergency-stop { position:fixed; bottom:18px; left:18px; z-index:2147483647;
-        border:2px solid #fff; border-radius:10px; padding:12px 17px; background:#ac2020; color:#fff;
-        font:700 13px Verdana,sans-serif; box-shadow:0 4px 15px #000b; cursor:pointer; }
-      #minibia-bot-emergency-stop:hover { background:#e02424; }
+      /* Compact emergency handle: always on top, independently draggable and keyboard accessible. */
+      #minibia-bot-emergency-stop {
+        box-sizing:border-box; position:fixed; bottom:16px; left:16px; width:44px; height:44px;
+        padding:0; margin:0; z-index:2147483647; display:flex; align-items:center;
+        justify-content:center; border:1px solid rgba(255,255,255,.65); border-radius:50%;
+        background:#a82020; color:#fff; font:700 21px Verdana,sans-serif;
+        box-shadow:0 2px 9px rgba(0,0,0,.64); opacity:.72; cursor:pointer;
+        touch-action:none; user-select:none; -webkit-user-select:none; transition: opacity .12s, background .12s;
+      }
+      #minibia-bot-emergency-stop:hover, #minibia-bot-emergency-stop:focus-visible,
+      #minibia-bot-emergency-stop[data-dragging="true"] { opacity:1; }
+      #minibia-bot-emergency-stop:focus-visible { outline:2px solid #fff; outline-offset:2px; }
+      #minibia-bot-emergency-stop[data-halted="true"] { background:#55585c; }
+      #minibia-bot-emergency-stop[data-dragging="true"] { cursor:grabbing; transition:none; }
       #minibia-bot-panel #minibia-bot-auto-sell-items { min-height:58px; resize:vertical; }
       @container (max-width:1060px) { #minibia-bot-panel .mb-quick-bar { grid-column:1 / -1; grid-row: 1; }
         #minibia-bot-panel .mb-cave-column {grid-row:2;} #minibia-bot-panel .mb-side-column {grid-row:2;} #minibia-bot-panel .mb-main-column {grid-row:3;} }
@@ -9374,6 +9413,12 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
                   <input type="number" id="minibia-bot-talk-max-delay" min="0" max="30" step="0.5" value="8" />
                 </label>
               </div>
+              <div class="mb-label">Test a reply (preview only)</div>
+              <label class="mb-field" for="minibia-bot-talk-test-message"><span class="mb-field-label">Simulated incoming message</span>
+                <input type="text" id="minibia-bot-talk-test-message" value="hola, como va la hunt?" maxlength="240" /></label>
+              <button type="button" class="mb-small-button" id="minibia-bot-talk-test">Test Gemini / Keywords</button>
+              <div id="minibia-bot-talk-test-result" class="mb-gemini-preview" role="status" aria-live="polite" hidden></div>
+              <div class="mb-small-note">Uses real Gemini API only in AI mode. Never sends the preview to game chat.</div>
               <div class="mb-small-note" id="minibia-bot-talk-status">Status: idle</div>
               <div class="mb-small-note">Responds only to nearby visible senders in Default. Keywords respond only when a rule matches. Minimum 15 seconds between messages.</div>
             </div>
@@ -9538,14 +9583,18 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     const quickBar = document.createElement("div");
     quickBar.className = "mb-quick-bar";
     quickBar.innerHTML = `
-      <strong>QUICK HUNT CONTROL</strong>
-      <label>Hunt route <select id="minibia-bot-quick-route"></select></label>
-      <label class="mb-toggle"><input id="minibia-bot-quick-prioritize" type="checkbox" checked /> Prioritize Monsters</label>
+      <div class="mb-quick-head"><strong>QUICK HUNT</strong><span class="mb-quick-hint">One click to start your saved hunt</span></div>
+      <label class="mb-quick-route">Hunt route <select id="minibia-bot-quick-route"></select></label>
+      <div class="mb-quick-settings">
+        <label class="mb-toggle"><input id="minibia-bot-quick-prioritize" type="checkbox" checked /><span>Prioritize monsters (pause waypoints while fighting)</span></label>
+        <span class="mb-quick-hint">Auto Attack starts automatically</span>
+      </div>
+      <div class="mb-quick-summary" id="minibia-bot-quick-summary">Will start Cave Bot + Auto Attack with saved combat settings.</div>
       <div class="mb-quick-actions">
         <button id="minibia-bot-quick-start" type="button">START HUNT</button>
         <button id="minibia-bot-quick-stop" type="button">STOP HUNT</button>
       </div>
-      <div class="mb-small-note" id="minibia-bot-quick-status">Stopped. Saves the selected route; does not auto-start on login.</div>`;
+      <div class="mb-small-note" id="minibia-bot-quick-status">Stopped. Saved settings never auto-start on login.</div>`;
     panel.querySelector(".mb-body")?.prepend(quickBar);
     function foldSections(columnClass, titleFor) {
       const column = panel.querySelector(columnClass);
@@ -9562,28 +9611,216 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
         column.append(details);
       });
     }
-    foldSections(".mb-cave-column", (s) => s.querySelector(".mb-label")?.textContent === "Auto Attack" ? "Combat / Auto Attack (advanced)" : "Waypoints / Seller / Auto Sell");
-    foldSections(".mb-side-column", (s) => ({"Xray":"Utility / Xray", "Auto Heal":"Survival / Auto Heal", "Talk":"Communication / Gemini", "Move Floor Items":"Loot / Floor Items"})[s.querySelector(".mb-label")?.textContent] || "More options");
-    foldSections(".mb-main-column", (s, i) => s.querySelector(".mb-label")?.textContent || (i === 0 ? "Reload Bot" : "Other utilities"));
+    // Reorganize existing nodes: controls retain their IDs, current values and listeners.
+    const mainColumn = panel.querySelector(".mb-main-column");
+    const sideColumn = panel.querySelector(".mb-side-column");
+    const caveColumn = panel.querySelector(".mb-cave-column");
+    const getSection = (column, title) => Array.from(column?.children || [])
+      .find((section) => section.classList.contains("mb-column-section") &&
+        section.querySelector(":scope > .mb-label")?.textContent === title);
+    const caveSection = getSection(caveColumn, "Cave Bot");
+    const caveStack = caveSection?.querySelector(":scope > .mb-stack");
+    const verificationStart = caveStack?.querySelector("#minibia-bot-cave-verification-pause")?.closest("label");
+    const verificationEnd = caveStack?.querySelector("#minibia-bot-cave-resume-verification")?.closest(".mb-actions");
+    let noticeSection = null;
+    if (caveStack && verificationStart && verificationEnd) {
+      noticeSection = document.createElement("div");
+      noticeSection.className = "mb-section mb-column-section";
+      const caption = document.createElement("div");
+      caption.className = "mb-label";
+      caption.textContent = "Verification / Sound alerts";
+      noticeSection.append(caption);
+      const noticeControls = document.createElement("div");
+      noticeControls.className = "mb-stack";
+      let node = verificationStart;
+      while (node) {
+        const next = node.nextElementSibling;
+        noticeControls.append(node);
+        if (node === verificationEnd) {
+          // Take the existing help note immediately after the alarm buttons too.
+          if (next?.classList.contains("mb-small-note")) noticeControls.append(next);
+          break;
+        }
+        node = next;
+      }
+      noticeSection.append(noticeControls);
+    }
+    const floorSection = getSection(sideColumn, "Move Floor Items");
+    let corpseSection = null;
+    if (floorSection) {
+      const floorStack = floorSection.querySelector(":scope > .mb-stack");
+      const corpseHeader = Array.from(floorStack?.children || [])
+        .find((child) => child.classList.contains("mb-label") && child.textContent.includes("Auto Loot Corpses"));
+      if (corpseHeader) {
+        corpseSection = document.createElement("div");
+        corpseSection.className = "mb-section mb-column-section";
+        const corpseStack = document.createElement("div");
+        corpseStack.className = "mb-stack";
+        while (corpseHeader.nextElementSibling) corpseStack.append(corpseHeader.nextElementSibling);
+        corpseHeader.textContent = "Auto Loot Corpses";
+        corpseSection.append(corpseHeader, corpseStack);
+        sideColumn.append(corpseSection);
+      }
+    }
+    const monitoring = document.createElement("details");
+    monitoring.className = "mb-fold mb-monitoring";
+    const monitorTitle = document.createElement("summary");
+    monitorTitle.textContent = "Anti Detection / Monitoring";
+    monitoring.append(monitorTitle);
+    const monitorIntro = document.createElement("div");
+    monitorIntro.className = "mb-monitor-intro";
+    monitorIntro.textContent = "Optional alerts, NPC/chat replies, unusual floor items and player monitoring. Does not solve verification challenges.";
+    monitoring.append(monitorIntro);
+    function placeMonitor(section, title) {
+      if (!section) return;
+      const sub = document.createElement("details");
+      sub.className = "mb-subfold";
+      const caption = document.createElement("summary");
+      caption.textContent = title;
+      sub.append(caption, section);
+      monitoring.append(sub);
+    }
+    placeMonitor(getSection(mainColumn, "Panic Runner Home: not set"), "Panic Runner / Player Alerts");
+    placeMonitor(getSection(mainColumn, "GM Kill Switch"), "GM Alerts");
+    placeMonitor(noticeSection, "Verification Notices / Loud Alarm");
+    placeMonitor(getSection(sideColumn, "Talk"), "Gemini / Auto Chat");
+    placeMonitor(floorSection, "Rare Floor Item Movement");
+    mainColumn.prepend(monitoring);
+    const mainUtilities = Array.from(mainColumn.children).find((child) =>
+      child.classList.contains("mb-column-section") && !!child.querySelector("#minibia-bot-rune-enabled"));
+    const loadedText = Array.from(mainColumn.children).find((child) =>
+      child.classList.contains("mb-column-section") && !!child.querySelector(".mb-note"));
+    if (mainUtilities && loadedText) mainUtilities.append(loadedText);
+    foldSections(".mb-cave-column", (section) => section.querySelector(":scope > .mb-label")?.textContent === "Auto Attack" ? "Combat / Auto Attack (advanced)" : "Waypoints / Seller / Auto Sell");
+    foldSections(".mb-side-column", (section) => ({"Xray":"Utility / Xray", "Auto Heal":"Survival / Auto Heal", "Auto Loot Corpses":"Loot / Corpses"})[section.querySelector(":scope > .mb-label")?.textContent] || "Additional Tools");
+    foldSections(".mb-main-column", (section) => {
+      if (section.querySelector("#minibia-bot-rune-enabled")) return "Supplies / Spells / Training";
+      if (section.querySelector("#minibia-bot-reload")) return "Reload Bot";
+      return "Additional Tools";
+    });
     const emergencyButton = document.createElement("button");
     emergencyButton.id = "minibia-bot-emergency-stop";
-    emergencyButton.textContent = "EMERGENCY STOP";
-    emergencyButton.title = "Immediately stop bot automation (Ctrl+Shift+X)";
+    emergencyButton.type = "button";
+    emergencyButton.textContent = "■";
+    emergencyButton.setAttribute("aria-keyshortcuts", "Control+Shift+X");
     document.body.appendChild(emergencyButton);
-    emergencyButton.addEventListener("click", () => bot.emergencyStop?.());
+
+    // The red handle is an emergency action, not a toggle: pressing it again never restarts automation.
+    // The grey state indicates the last emergency stop only while no known automation is running.
+    const emergencyActiveModules = ["attack", "cave", "heal", "rune", "eat", "invisible", "magicShield", "equipRing", "talk", "floorMove", "corpseLoot", "panic"];
+    function refreshEmergencyButton() {
+      const running = emergencyActiveModules.some((module) => {
+        try { return bot[module]?.status?.()?.running === true; } catch (_) { return false; }
+      });
+      const halted = !!bot.storage.get("minibiaBot.emergencyStop", false) && !running;
+      emergencyButton.dataset.halted = String(halted);
+      emergencyButton.setAttribute("aria-label", halted ? "Emergency stop applied; manual control (Ctrl+Shift+X)" : "Emergency stop: take manual control (Ctrl+Shift+X)");
+      emergencyButton.title = halted ? "Emergency stop applied · Manual control · Ctrl+Shift+X" : "STOP ALL · Ctrl+Shift+X · Drag to reposition";
+    }
+    function triggerEmergencyStop() {
+      bot.emergencyStop?.();
+      refreshEmergencyButton();
+    }
+    const emergencyDiameter = 44;
+    const clampEmergency = (x, y) => ({
+      left: Math.max(0, Math.min(Math.max(0, window.innerWidth - emergencyDiameter), x)),
+      top: Math.max(0, Math.min(Math.max(0, window.innerHeight - emergencyDiameter), y)),
+    });
+    function applyEmergencyPosition(x, y) {
+      const pos = clampEmergency(x, y);
+      emergencyButton.style.left = `${pos.left}px`;
+      emergencyButton.style.top = `${pos.top}px`;
+      emergencyButton.style.right = "auto";
+      emergencyButton.style.bottom = "auto";
+      return pos;
+    }
+    const savedEmergencyPosition = bot.storage.get(emergencyPositionKey, null);
+    if (Number.isFinite(savedEmergencyPosition?.left) && Number.isFinite(savedEmergencyPosition?.top)) {
+      applyEmergencyPosition(savedEmergencyPosition.left, savedEmergencyPosition.top);
+    }
+    let emergencyPointer = null;
+    let emergencyDragged = false;
+    emergencyButton.addEventListener("pointerdown", (event) => {
+      if (event.button !== 0 || emergencyPointer) return;
+      event.stopPropagation();
+      const rect = emergencyButton.getBoundingClientRect();
+      emergencyPointer = { id: event.pointerId, startX: event.clientX, startY: event.clientY,
+        left: rect.left, top: rect.top, dragging: false };
+      emergencyDragged = false;
+      emergencyButton.setPointerCapture?.(event.pointerId);
+    });
+    emergencyButton.addEventListener("pointermove", (event) => {
+      if (!emergencyPointer || event.pointerId !== emergencyPointer.id) return;
+      const dx = event.clientX - emergencyPointer.startX;
+      const dy = event.clientY - emergencyPointer.startY;
+      if (!emergencyPointer.dragging && Math.hypot(dx, dy) > 6) emergencyPointer.dragging = true;
+      if (!emergencyPointer.dragging) return;
+      event.preventDefault();
+      event.stopPropagation();
+      emergencyDragged = true;
+      emergencyButton.dataset.dragging = "true";
+      applyEmergencyPosition(emergencyPointer.left + dx, emergencyPointer.top + dy);
+    });
+    function finishEmergencyDrag(event) {
+      if (!emergencyPointer || event.pointerId !== emergencyPointer.id) return;
+      event.stopPropagation();
+      if (emergencyPointer.dragging) {
+        const rect = emergencyButton.getBoundingClientRect();
+        bot.storage.set(emergencyPositionKey, {left:rect.left, top:rect.top});
+      }
+      emergencyPointer = null;
+      delete emergencyButton.dataset.dragging;
+    }
+    emergencyButton.addEventListener("pointerup", finishEmergencyDrag);
+    emergencyButton.addEventListener("pointercancel", (event) => {
+      emergencyDragged = true;
+      finishEmergencyDrag(event);
+    });
+    emergencyButton.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      if (emergencyDragged) { emergencyDragged = false; return; }
+      triggerEmergencyStop();
+    });
     const emergencyHotkey = (event) => {
-      if (event.ctrlKey && event.shiftKey && event.code === "KeyX") {
-        event.preventDefault(); event.stopImmediatePropagation(); bot.emergencyStop?.();
+      if (event.ctrlKey && event.shiftKey && event.code === "KeyX" && !event.repeat) {
+        event.preventDefault(); event.stopImmediatePropagation(); triggerEmergencyStop();
       }
     };
+    const repositionEmergencyOnResize = () => {
+      const rect = emergencyButton.getBoundingClientRect();
+      applyEmergencyPosition(rect.left, rect.top);
+    };
+    window.addEventListener("resize", repositionEmergencyOnResize);
     window.addEventListener("keydown", emergencyHotkey, true);
-    bot.addCleanup(() => { emergencyButton.remove(); window.removeEventListener("keydown", emergencyHotkey, true); });
+    refreshEmergencyButton();
+    const emergencyStatusTimer = window.setInterval(refreshEmergencyButton, 1500);
+    bot.addCleanup(() => {
+      window.clearInterval(emergencyStatusTimer);
+      window.removeEventListener("resize", repositionEmergencyOnResize);
+      window.removeEventListener("keydown", emergencyHotkey, true);
+      emergencyButton.remove();
+    });
 
     const quickRoute = quickBar.querySelector("#minibia-bot-quick-route");
     const quickStart = quickBar.querySelector("#minibia-bot-quick-start");
     const quickStop = quickBar.querySelector("#minibia-bot-quick-stop");
     const quickPrioritize = quickBar.querySelector("#minibia-bot-quick-prioritize");
     const quickStatus = quickBar.querySelector("#minibia-bot-quick-status");
+    const quickSummary = quickBar.querySelector("#minibia-bot-quick-summary");
+    function refreshQuickSummary() {
+      const attack = bot.attack?.status?.();
+      const c = attack?.config || bot.attack?.config || {};
+      const heal = bot.heal?.status?.();
+      const healLabel = heal?.running ? "Heal ON" : "Heal OFF (unchanged)";
+      const melee = c.meleeMode === true;
+      const chase = c.chaseController === "pathfinder" ? "Bot pathfinding" :
+        c.chaseController === "native" ? "Native" : "Hybrid";
+      const stairs = c.avoidFloorChangesOnChase !== false ? "strict stairs ON" : "strict stairs OFF";
+      quickSummary.textContent = `START HUNT = selected route + Auto Attack + ${quickPrioritize.checked ? "monster priority ON" : "monster priority OFF"}. ` +
+        `Melee ${melee ? "ON" : "OFF"} · ${chase} · ${stairs} · ${healLabel}. ` +
+        `Does not change Melee, Chase or Heal settings.`;
+    }
     function refreshQuickRoutes() {
       const names = bot.cave?.getPresetNames?.() || [];
       const selected = quickRoute.value || bot.storage.get("minibiaBot.quick.route", "") || bot.cave?.getActivePresetName?.();
@@ -9596,12 +9833,14 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
       }
       quickStart.disabled = !names.length;
       quickStatus.textContent = bot.cave?.status?.()?.running ? "Hunt active" : "Hunt stopped (manual control)";
+      refreshQuickSummary();
     }
     quickRoute.addEventListener("change", () => bot.storage.set("minibiaBot.quick.route", quickRoute.value));
     quickPrioritize.checked = bot.storage.get("minibiaBot.quick.prioritize", true) !== false;
     quickPrioritize.addEventListener("change", () => {
       bot.storage.set("minibiaBot.quick.prioritize", quickPrioritize.checked);
       bot.cave?.updateConfig?.({prioritizeMonsters: quickPrioritize.checked});
+      refreshQuickSummary();
     });
     quickStart.addEventListener("click", () => {
       const name = quickRoute.value;
@@ -9670,6 +9909,37 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     const floorMoveWalk = panel.querySelector("#minibia-bot-floor-move-walk");
     const floorMoveScan = panel.querySelector("#minibia-bot-floor-move-scan");
     const floorMoveStatus = panel.querySelector("#minibia-bot-floor-move-status");
+    const talkTestButton = panel.querySelector("#minibia-bot-talk-test");
+    const talkTestMessage = panel.querySelector("#minibia-bot-talk-test-message");
+    const talkTestResult = panel.querySelector("#minibia-bot-talk-test-result");
+    let talkPreviewSequence = 0;
+    talkTestButton?.addEventListener("click", async () => {
+      const message = talkTestMessage?.value?.trim();
+      if (!message) { talkTestResult.textContent = "Enter a test message first."; talkTestResult.hidden = false; return; }
+      const sequence = ++talkPreviewSequence;
+      talkTestButton.disabled = true;
+      talkTestResult.hidden = false;
+      talkTestResult.textContent = "Generating preview… (no chat message will be sent)";
+      try {
+        // Read the latest values even before user blurs a field.
+        bot.talk?.updateConfig?.({
+          apiKey: panel.querySelector("#minibia-bot-talk-api-key")?.value?.trim() || "",
+          systemPrompt: panel.querySelector("#minibia-bot-talk-prompt")?.value?.trim() || bot.talk?.config?.systemPrompt,
+          replyMode: panel.querySelector("#minibia-bot-talk-mode")?.value || "gemini",
+          ruleText: panel.querySelector("#minibia-bot-talk-rules")?.value || ""
+        });
+        const result = await bot.talk?.previewReply?.(message);
+        if (sequence === talkPreviewSequence && document.getElementById("minibia-bot-panel") === panel) {
+          talkTestResult.textContent = result ? `Preview: ${result}` : "No matching keyword / empty response.";
+        }
+      } catch (error) {
+        if (sequence === talkPreviewSequence && document.getElementById("minibia-bot-panel") === panel) {
+          talkTestResult.textContent = `Test failed: ${String(error?.message || error).slice(0, 350)}`;
+        }
+      } finally {
+        if (sequence === talkPreviewSequence) talkTestButton.disabled = false;
+      }
+    });
     const talkEnabledInput = panel.querySelector("#minibia-bot-talk-enabled");
     const talkModeInput = panel.querySelector("#minibia-bot-talk-mode");
     const talkAiSettings = panel.querySelector("#minibia-bot-talk-ai-settings");
