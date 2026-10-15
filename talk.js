@@ -28,6 +28,8 @@ window.__minibiaBotBundle.installTalkModule = function installTalkModule(bot) {
     lastReplyAt: 0,
     seenKeys: [],
     seenSignatures: [],
+    generation: 0,
+    queuedReply: null,
   };
   const greetingReplies = ["yo", "sup", "hey", "hiya", "yo lol"];
   const agreeReplies = ["true", "fr", "based", "ya", "real"];
@@ -38,10 +40,14 @@ window.__minibiaBotBundle.installTalkModule = function installTalkModule(bot) {
     {
       enabled: false,
       replyToNpcs: false, // Opt-in: reply to nearby NPCs by entity type, regardless of name
+      replyMode: "gemini", // "gemini" or "rules"; rules do not call external APIs
+      ruleText: "hola|hello|hi => hola!\ncomo estas|how are you => todo bien, y vos?\nhelp|ayuda => que necesitas?",
+      replyDelayMinMs: 4000,
+      replyDelayMaxMs: 8000,
       apiKey: "",
       model: defaultModel,
       pollMs: minPollMs,
-      replyCooldownMs: 1500,
+      replyCooldownMs: 15000,
       systemPrompt: defaultSystemPrompt,
       greetingPrompt: defaultGreetingPrompt,
       questionPrompt: defaultQuestionPrompt,
@@ -63,13 +69,17 @@ window.__minibiaBotBundle.installTalkModule = function installTalkModule(bot) {
 
   function sanitizeConfig() {
     config.replyToNpcs = config.replyToNpcs === true;
+    config.replyMode = config.replyMode === "rules" ? "rules" : "gemini";
+    config.ruleText = String(config.ruleText || "").slice(0, 4000);
+    config.replyDelayMinMs = Math.min(30000, Math.max(0, Number(config.replyDelayMinMs) || 0));
+    config.replyDelayMaxMs = Math.min(30000, Math.max(config.replyDelayMinMs, Number(config.replyDelayMaxMs) || 0));
     config.apiKey = String(config.apiKey || "").trim();
     config.model = String(config.model || defaultModel).trim() || defaultModel;
     if (legacyDefaultModels.includes(config.model)) {
       config.model = defaultModel;
     }
     config.pollMs = Math.max(minPollMs, Number(config.pollMs) || minPollMs);
-    config.replyCooldownMs = Math.max(0, Number(config.replyCooldownMs) || 1500);
+    config.replyCooldownMs = Math.max(15000, Number(config.replyCooldownMs) || 15000);
     config.systemPrompt = String(config.systemPrompt || defaultSystemPrompt).trim() || defaultSystemPrompt;
     config.greetingPrompt = String(config.greetingPrompt || defaultGreetingPrompt).trim() || defaultGreetingPrompt;
     config.questionPrompt = String(config.questionPrompt || defaultQuestionPrompt).trim() || defaultQuestionPrompt;
@@ -562,80 +572,108 @@ window.__minibiaBotBundle.installTalkModule = function installTalkModule(bot) {
     return pickUnusedReply(["lol", "maybe", "ya", "true", "kinda"], 30000, "lol");
   }
 
-  async function maybeRespond() {
-    if (!state.running || state.pending || !config.enabled || !config.apiKey) {
-      return false;
-    }
 
-    if (Date.now() - state.lastReplyAt < config.replyCooldownMs) {
+  function foldText(text) {
+    return normalizeText(text).normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+  }
+
+  function findRuleReply(messageText) {
+    const message = foldText(messageText);
+    if (!message) return "";
+    for (const line of config.ruleText.split(/\r?\n/).slice(0, 60)) {
+      const separator = line.indexOf("=>");
+      if (separator <= 0 || line.trim().startsWith("#")) continue;
+      const response = line.slice(separator + 2).trim();
+      if (!response) continue;
+      const keywords = line.slice(0, separator).split("|")
+        .map((keyword) => foldText(keyword)).filter(Boolean);
+      if (keywords.some((keyword) => {
+        // Avoid matching short fragments such as "hi" inside "something".
+        const corpus = ` ${message.replace(/[^a-z0-9]+/g, " ").trim()} `;
+        const needle = ` ${keyword.replace(/[^a-z0-9]+/g, " ").trim()} `;
+        return needle.trim() && corpus.includes(needle);
+      })) {
+        return response.slice(0, 90);
+      }
+    }
+    return "";
+  }
+
+  function getReplyDelay() {
+    const low = config.replyDelayMinMs;
+    const high = config.replyDelayMaxMs;
+    return Math.round(low + Math.random() * (high - low));
+  }
+
+  function wait(ms) {
+    return new Promise((resolve) => window.setTimeout(resolve, ms));
+  }
+
+  async function maybeRespond() {
+    if (!state.running || state.pending || !config.enabled ||
+        (config.replyMode === "gemini" && !config.apiKey)) {
       return false;
     }
+    if (Date.now() - state.lastReplyAt < config.replyCooldownMs) return false;
 
     const pending = getNewestPendingMessage();
-    if (!pending?.targetMessage) {
+    if (!pending?.targetMessage) return false;
+    const target = pending.targetMessage;
+    const npcMessage = isNpcMessage(target);
+    const visible = npcMessage
+      ? config.replyToNpcs && isSenderVisibleNpc(target)
+      : isSenderVisiblePlayer(target);
+    if (!visible) {
+      rememberSeenMessages(pending.pendingMessages);
       return false;
     }
 
     state.pending = true;
-
+    const generation = state.generation;
+    state.queuedReply = { sender: target.sender, mode: config.replyMode };
     try {
-      const contextMessages = getDefaultMessages().slice(-6);
-      const npcMessage = isNpcMessage(pending.targetMessage);
-      const visible = npcMessage
-        ? config.replyToNpcs && isSenderVisibleNpc(pending.targetMessage)
-        : isSenderVisiblePlayer(pending.targetMessage);
-      if (!visible) {
-        rememberSeenMessages(pending.pendingMessages);
-        bot.log("talk skipped reply", {
-          sender: pending.targetMessage.sender,
-          message: pending.targetMessage.body,
-          reason: "sender-not-visible",
-        });
-        return false;
+      let reply = "";
+      let messageType = config.replyMode;
+      if (config.replyMode === "rules") {
+        reply = sanitizeReply(findRuleReply(target.body));
+        // Ignore unmatched messages without fabricating an answer.
+        if (!reply) {
+          rememberSeenMessages(pending.pendingMessages);
+          return false;
+        }
+      } else {
+        const contextMessages = getDefaultMessages().slice(-6);
+        messageType = npcMessage ? "npc" :
+          await classifyMessageType(target, contextMessages);
+        const rawReply = npcMessage
+          ? await generateText(buildNpcReplyPrompt(target, contextMessages), {
+              temperature: 0.25, topP: 0.8, maxOutputTokens: 80,
+            })
+          : isBotQuestion(target.body) ? "no" :
+            await generateText(buildReplyPrompt(target, contextMessages, messageType));
+        reply = npcMessage ? sanitizeReply(rawReply) :
+          (sanitizeReply(rawReply) || pickFallbackReply(target, messageType));
       }
-
-      // NPC dialogue bypasses the player-chat classifier. One Gemini call per
-      // NPC message, regardless of the NPC's display name.
-      const messageType = npcMessage ? "npc" :
-        await classifyMessageType(pending.targetMessage, contextMessages);
-      const rawReply = npcMessage
-        ? await generateText(buildNpcReplyPrompt(pending.targetMessage, contextMessages), {
-            temperature: 0.25, topP: 0.8, maxOutputTokens: 80,
-          })
-        : isBotQuestion(pending.targetMessage.body)
-          ? "no"
-          : await generateText(buildReplyPrompt(pending.targetMessage, contextMessages, messageType));
-      // No invented fallback for NPCs: skip if Gemini couldn't provide an answer.
-      const reply = npcMessage ? sanitizeReply(rawReply) :
-        (sanitizeReply(rawReply) || pickFallbackReply(pending.targetMessage, messageType));
 
       rememberSeenMessages(pending.pendingMessages);
-
-      if (!reply) {
-        bot.log("talk skipped reply", {
-          sender: pending.targetMessage.sender,
-          message: pending.targetMessage.body,
-          messageType,
-          rawReply,
-        });
-        return false;
-      }
+      if (!reply || !state.running || generation !== state.generation) return false;
+      await wait(getReplyDelay());
+      // An operator can switch modes or stop the module during the delay.
+      if (!state.running || generation !== state.generation ||
+          (!npcMessage && !isSenderVisiblePlayer(target)) ||
+          (npcMessage && !isSenderVisibleNpc(target)) ||
+          Date.now() - state.lastReplyAt < config.replyCooldownMs) return false;
 
       const sent = bot.sendChat(reply);
       if (sent) {
         state.lastReplyAt = Date.now();
-        bot.log("talk replied", {
-          npc: npcMessage,
-          sender: pending.targetMessage.sender,
-          message: pending.targetMessage.body,
-          messageType,
-          reply,
-        });
+        bot.log("talk replied", { npc: npcMessage, sender: target.sender,
+          message: target.body, messageType, mode: config.replyMode, reply });
       }
-
       return sent;
     } finally {
       state.pending = false;
+      state.queuedReply = null;
     }
   }
 
@@ -664,8 +702,8 @@ window.__minibiaBotBundle.installTalkModule = function installTalkModule(bot) {
     sanitizeConfig();
     persistConfig();
 
-    if (!config.apiKey) {
-      bot.log("talk module requires a Gemini API key");
+    if (config.replyMode === "gemini" && !config.apiKey) {
+      bot.log("talk in Gemini mode requires an API key");
       return false;
     }
 
@@ -674,9 +712,10 @@ window.__minibiaBotBundle.installTalkModule = function installTalkModule(bot) {
     }
 
     state.running = true;
+    state.generation += 1;
     seedSeenMessages();
     bot.log("talk module started", {
-      model: config.model,
+      model: config.replyMode === "gemini" ? config.model : "rules (offline)",
       channel: "Default",
       replyToNpcs: config.replyToNpcs,
     });
@@ -687,6 +726,7 @@ window.__minibiaBotBundle.installTalkModule = function installTalkModule(bot) {
   function stop(options = {}) {
     const shouldPersistEnabled = options.persistEnabled !== false;
     state.running = false;
+    state.generation += 1;
 
     if (shouldPersistEnabled) {
       config.enabled = false;
@@ -705,6 +745,7 @@ window.__minibiaBotBundle.installTalkModule = function installTalkModule(bot) {
     return {
       running: state.running,
       pending: state.pending,
+      queuedReply: state.queuedReply,
       lastReplyAt: state.lastReplyAt,
       config: {
         ...config,
@@ -714,15 +755,17 @@ window.__minibiaBotBundle.installTalkModule = function installTalkModule(bot) {
   }
 
   function updateConfig(nextConfig = {}) {
+    const oldMode = config.replyMode;
     Object.assign(config, nextConfig);
     sanitizeConfig();
+    if (config.replyMode !== oldMode) state.generation += 1;
     persistConfig();
     return status().config;
   }
 
   sanitizeConfig();
 
-  if (config.enabled && config.apiKey) {
+  if (config.enabled && (config.replyMode === "rules" || config.apiKey)) {
     start();
   }
 

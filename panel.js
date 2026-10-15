@@ -384,12 +384,12 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     }
 
     if (statusLabel) {
-      if (!status?.config?.apiKey) {
-        statusLabel.textContent = "Status: API key missing";
+      if (status?.config?.replyMode === "gemini" && !status?.config?.apiKey) {
+        statusLabel.textContent = "Status: Gemini API key missing";
       } else if (status?.pending) {
-        statusLabel.textContent = "Status: generating";
+        statusLabel.textContent = "Status: preparing reply";
       } else if (status?.running) {
-        statusLabel.textContent = "Status: listening to Default";
+        statusLabel.textContent = `Status: listening to Default (${status.config.replyMode})`;
       } else {
         statusLabel.textContent = "Status: idle";
       }
@@ -1196,11 +1196,33 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
                 <input type="checkbox" id="minibia-bot-talk-npc-replies" />
                 <span>Reply to nearby NPCs (any name)</span>
               </label>
-              <input type="password" id="minibia-bot-talk-api-key" placeholder="Gemini API key" />
-              <textarea id="minibia-bot-talk-prompt" placeholder="Reply style prompt"></textarea>
+              <label class="mb-field" for="minibia-bot-talk-mode">
+                <span class="mb-field-label">Response mode</span>
+                <select id="minibia-bot-talk-mode">
+                  <option value="gemini">Gemini (AI)</option>
+                  <option value="rules">Keywords (no AI, no API key)</option>
+                </select>
+              </label>
+              <div id="minibia-bot-talk-ai-settings" class="mb-stack">
+                <input type="password" id="minibia-bot-talk-api-key" placeholder="Gemini API key" autocomplete="off" />
+                <textarea id="minibia-bot-talk-prompt" placeholder="Reply style prompt"></textarea>
+              </div>
+              <label class="mb-field" for="minibia-bot-talk-rules">
+                <span class="mb-field-label">Keyword replies: word1|word2 =&gt; response (one rule per line)</span>
+                <textarea id="minibia-bot-talk-rules" rows="4" spellcheck="false" placeholder="hola|hello|hi => hola!&#10;ayuda|help => decime"></textarea>
+              </label>
+              <div class="mb-field-grid">
+                <label class="mb-field" for="minibia-bot-talk-min-delay">
+                  <span class="mb-field-label">Minimum delay (seconds)</span>
+                  <input type="number" id="minibia-bot-talk-min-delay" min="0" max="30" step="0.5" value="4" />
+                </label>
+                <label class="mb-field" for="minibia-bot-talk-max-delay">
+                  <span class="mb-field-label">Maximum delay (seconds)</span>
+                  <input type="number" id="minibia-bot-talk-max-delay" min="0" max="30" step="0.5" value="8" />
+                </label>
+              </div>
               <div class="mb-small-note" id="minibia-bot-talk-status">Status: idle</div>
-              <div class="mb-small-note">Replies to the newest unseen message in Default. NPC replies require the separate opt-in toggle, a nearby NPC, and Gemini.</div>
-              <div class="mb-small-note">It will not reply to itself and will not admit it is a bot.</div>
+              <div class="mb-small-note">Responds only to nearby visible senders in Default. Keywords respond only when a rule matches. Minimum 15 seconds between messages.</div>
             </div>
           </div>
           <div class="mb-section mb-column-section">
@@ -1270,8 +1292,11 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
                 <span class="mb-field-label">Notice scan tick (ms, 200-5000)</span>
                 <input type="number" id="minibia-bot-cave-verification-tick" min="200" max="5000" step="100" value="500" />
               </label>
-              <button type="button" class="mb-small-button" id="minibia-bot-cave-resume-verification">Resume Waypoints</button>
-              <div class="mb-small-note">Only waypoint movement pauses. Attack and Heal remain active; Melee Attack can still move the character. Solve the notice manually, then resume. Text-based notices only.</div>
+              <div class="mb-actions mb-actions-inline-two">
+                <button type="button" class="mb-small-button" id="minibia-bot-cave-test-alarm">Test Loud Alarm</button>
+                <button type="button" class="mb-small-button" id="minibia-bot-cave-resume-verification">Resume Waypoints</button>
+              </div>
+              <div class="mb-small-note">Check the toggle to enable notifications. Test audio once with the button. Only waypoints pause: Attack and Heal continue. Notices in chat or visible UI are detected when their text matches.</div>
               <div class="mb-actions mb-actions-inline-two">
                 <button type="button" class="mb-small-button" id="minibia-bot-cave-start">Start</button>
                 <button type="button" class="mb-small-button" id="minibia-bot-cave-stop">Stop</button>
@@ -1290,6 +1315,15 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
                 <input type="checkbox" id="minibia-bot-auto-attack-melee" />
                 <span>Melee Mode</span>
               </label>
+              <label class="mb-field" for="minibia-bot-auto-attack-chase-controller">
+                <span class="mb-field-label">Melee pursuit method</span>
+                <select id="minibia-bot-auto-attack-chase-controller">
+                  <option value="hybrid">Hybrid: native first, bot backup</option>
+                  <option value="native">Native Safe Chase (automatic)</option>
+                  <option value="pathfinder">Bot pathfinding (avoid stairs)</option>
+                </select>
+              </label>
+              <div class="mb-small-note">Hybrid: manually enabled Minibia Auto Chase takes priority; if it switches OFF, bot pathfinding follows safely as backup. Neither controller runs when Melee Mode is OFF. Native mode activates Safe Chase automatically; bot-only mode always uses pathfinding.</div>
               <label class="mb-field" for="minibia-bot-auto-attack-hotkey">
                 <span class="mb-field-label">Target Hotkey (1-12)</span>
                 <input type="number" id="minibia-bot-auto-attack-hotkey" min="1" max="12" placeholder="3" />
@@ -1298,7 +1332,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
                 <span class="mb-field-label">Rune Hotkey (1-12)</span>
                 <input type="number" id="minibia-bot-auto-attack-rune-hotkey" min="1" max="12" placeholder="4" />
               </label>
-              <div class="mb-small-note">Melee mode uses the target hotkey, then walks adjacent to the target. Non-melee mode uses the target hotkey to acquire a target and the rune hotkey to cast on that target.</div>
+              <div class="mb-small-note">Auto Attack selects targets by creature ID without repeatedly pressing the target hotkey. Melee chooses a movement controller; non-melee lets you walk manually.</div>
             </div>
           </div>
         </div>
@@ -1340,6 +1374,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     const autoHealManaHotkeyInput = panel.querySelector("#minibia-bot-auto-heal-mana-hotkey");
     const autoAttackEnabledInput = panel.querySelector("#minibia-bot-auto-attack-enabled");
     const autoAttackMeleeInput = panel.querySelector("#minibia-bot-auto-attack-melee");
+    const autoAttackChaseController = panel.querySelector("#minibia-bot-auto-attack-chase-controller");
     const autoAttackHotkeyInput = panel.querySelector("#minibia-bot-auto-attack-hotkey");
     const autoAttackRuneHotkeyInput = panel.querySelector("#minibia-bot-auto-attack-rune-hotkey");
     const floorMoveToggle = panel.querySelector("#minibia-bot-floor-move-enabled");
@@ -1349,6 +1384,11 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     const floorMoveScan = panel.querySelector("#minibia-bot-floor-move-scan");
     const floorMoveStatus = panel.querySelector("#minibia-bot-floor-move-status");
     const talkEnabledInput = panel.querySelector("#minibia-bot-talk-enabled");
+    const talkModeInput = panel.querySelector("#minibia-bot-talk-mode");
+    const talkAiSettings = panel.querySelector("#minibia-bot-talk-ai-settings");
+    const talkRulesInput = panel.querySelector("#minibia-bot-talk-rules");
+    const talkMinDelayInput = panel.querySelector("#minibia-bot-talk-min-delay");
+    const talkMaxDelayInput = panel.querySelector("#minibia-bot-talk-max-delay");
     const talkNpcInput = panel.querySelector("#minibia-bot-talk-npc-replies");
     const talkApiKeyInput = panel.querySelector("#minibia-bot-talk-api-key");
     const talkPromptInput = panel.querySelector("#minibia-bot-talk-prompt");
@@ -1369,6 +1409,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     const caveVerificationPauseInput = panel.querySelector("#minibia-bot-cave-verification-pause");
     const caveVerificationTickInput = panel.querySelector("#minibia-bot-cave-verification-tick");
     const caveResumeVerificationButton = panel.querySelector("#minibia-bot-cave-resume-verification");
+    const caveTestAlarmButton = panel.querySelector("#minibia-bot-cave-test-alarm");
     const caveRecordButton = panel.querySelector("#minibia-bot-cave-record");
     const caveRemoveLastButton = panel.querySelector("#minibia-bot-cave-remove-last");
     const caveStartButton = panel.querySelector("#minibia-bot-cave-start");
@@ -1600,6 +1641,12 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
       });
     }
 
+    if (caveTestAlarmButton) {
+      caveTestAlarmButton.addEventListener("click", () => {
+        bot.playAlarm?.();
+      });
+    }
+
     if (caveResumeVerificationButton) {
       caveResumeVerificationButton.addEventListener("click", () => {
         bot.cave.resumeAfterVerification();
@@ -1784,10 +1831,21 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
       });
     }
 
+    if (autoAttackChaseController) {
+      const savedChaseController = bot.attack?.config?.chaseController;
+      autoAttackChaseController.value = ["hybrid", "native", "pathfinder"].includes(savedChaseController)
+        ? savedChaseController : "hybrid";
+      autoAttackChaseController.disabled = bot.attack?.config?.meleeMode === false;
+      autoAttackChaseController.addEventListener("change", () => {
+        bot.attack.updateConfig({ chaseController: autoAttackChaseController.value });
+      });
+    }
+
     if (autoAttackMeleeInput) {
       autoAttackMeleeInput.checked = bot.attack?.config?.meleeMode !== false;
       autoAttackMeleeInput.addEventListener("change", () => {
         bot.attack.updateConfig({ meleeMode: autoAttackMeleeInput.checked });
+        if (autoAttackChaseController) autoAttackChaseController.disabled = !autoAttackMeleeInput.checked;
       });
     }
 
@@ -1807,9 +1865,11 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
           return bot.attack.config.runeHotbarSlot ?? null;
         })();
         const meleeMode = !!autoAttackMeleeInput?.checked;
+        const chaseController = ["hybrid", "native", "pathfinder"].includes(autoAttackChaseController?.value)
+          ? autoAttackChaseController.value : "hybrid";
 
         if (autoAttackEnabledInput.checked) {
-          bot.attack.start({ targetHotbarSlot, runeHotbarSlot, meleeMode });
+          bot.attack.start({ targetHotbarSlot, runeHotbarSlot, meleeMode, chaseController });
         } else {
           bot.attack.stop();
         }
@@ -1861,6 +1921,42 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
             "No items visible on current floor");
       });
     }
+
+    function refreshTalkModeInputs() {
+      const mode = bot.talk?.config?.replyMode || "gemini";
+      if (talkModeInput) talkModeInput.value = mode;
+      if (talkAiSettings) talkAiSettings.style.display = mode === "gemini" ? "" : "none";
+    }
+
+    if (talkModeInput) {
+      talkModeInput.addEventListener("change", () => {
+        bot.talk.updateConfig({ replyMode: talkModeInput.value });
+        refreshTalkModeInputs();
+        refreshTalkStatus();
+      });
+    }
+    if (talkRulesInput) {
+      talkRulesInput.value = bot.talk?.config?.ruleText || "";
+      talkRulesInput.addEventListener("change", () => {
+        bot.talk.updateConfig({ ruleText: talkRulesInput.value });
+      });
+    }
+    function saveTalkDelayConfig() {
+      let min = Math.max(0, Math.min(30, Number(talkMinDelayInput?.value) || 0));
+      let max = Math.max(min, Math.min(30, Number(talkMaxDelayInput?.value) || 0));
+      if (talkMinDelayInput) talkMinDelayInput.value = String(min);
+      if (talkMaxDelayInput) talkMaxDelayInput.value = String(max);
+      bot.talk.updateConfig({ replyDelayMinMs: min * 1000, replyDelayMaxMs: max * 1000 });
+    }
+    if (talkMinDelayInput) {
+      talkMinDelayInput.value = String((bot.talk?.config?.replyDelayMinMs ?? 4000) / 1000);
+      talkMinDelayInput.addEventListener("change", saveTalkDelayConfig);
+    }
+    if (talkMaxDelayInput) {
+      talkMaxDelayInput.value = String((bot.talk?.config?.replyDelayMaxMs ?? 8000) / 1000);
+      talkMaxDelayInput.addEventListener("change", saveTalkDelayConfig);
+    }
+    refreshTalkModeInputs();
 
     if (talkApiKeyInput) {
       talkApiKeyInput.value = bot.talk?.config?.apiKey || "";

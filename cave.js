@@ -1472,10 +1472,24 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
 
   // Human-in-the-loop warning detection. This deliberately never clicks,
   // classifies, or solves a verification challenge.
-  const verificationNoticePattern = /(?:anti[\s-]*bot(?:[\s-]*(?:test|check|verification|challenge))?|verificaci[oó]n[\s-]*anti[\s-]*bot|(?:test|prueba)[\s-]*anti[\s-]*bot|toca el objeto que se ilumin[oó]|touch the (?:object|item) that (?:lit up|was illuminated))/i;
-  const verificationTriggerPattern = /(?:anti[\s-]*bot(?:[\s-]*(?:test|check|verification|challenge))?|verificaci[oó]n[\s-]*anti[\s-]*bot|(?:test|prueba)[\s-]*anti[\s-]*bot|toca el objeto que se ilumin[oó]|touch the (?:object|item) that (?:lit up|was illuminated))/i;
-
+  const verificationNoticePattern = /(?:anti[\s_-]*bot|bot[\s_-]*(?:test|check|verification|challenge)|captcha|verificaci[oó]n[\s_-]*anti[\s_-]*bot|(?:test|prueba)[\s_-]*anti[\s_-]*bot|toca el objeto que se ilumin[oó]|touch the (?:object|item) that (?:lit up|was illuminated)|verify (?:you are|you're) human)/i;
   function findVisibleVerificationNotice() {
+    // System notices may live in the chat data, not in normal HTML.
+    const channels = window.gameClient?.interface?.channelManager?.channels || [];
+    for (const channel of channels) {
+      const entries = channel?.__contents || [];
+      const startIndex = Math.max(0, entries.length - 8);
+      for (let index = entries.length - 1; index >= startIndex; index -= 1) {
+        const entry = entries[index];
+        const message = String(entry?.message || entry?.text || "").trim();
+        if (message && message.length < 500 && verificationNoticePattern.test(message)) {
+          return {
+            text: message.slice(0, 160),
+            key: `chat:${channel?.name || ""}:${index}:${entry?.__time || entry?.time || ""}:${message}`,
+          };
+        }
+      }
+    }
     if (!document.body || typeof document.createTreeWalker !== "function") return null;
     const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
     let visited = 0;
@@ -1487,7 +1501,7 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
       if (!parent || parent.closest("#minibia-bot-panel, script, style, noscript, template")) continue;
       if (parent.closest('[aria-hidden="true"], [hidden]')) continue;
       if (typeof parent.getClientRects === "function" && parent.getClientRects().length === 0) continue;
-      if (verificationTriggerPattern.test(value)) return value.slice(0, 160);
+      return { text: value.slice(0, 160), key: `dom:${value}` };
     }
     return null;
   }
@@ -1500,14 +1514,14 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
         state.ignoredVerificationNotice = null;
         return;
       }
-      if (notice === state.ignoredVerificationNotice) return;
+      if (notice.key === state.ignoredVerificationNotice) return;
       state.lastVerificationSeenAt = Date.now();
-      state.lastVerificationNotice = notice;
+      state.lastVerificationNotice = notice.text;
       if (state.pausedForVerification) return;
       state.pausedForVerification = true;
       cancelOwnWaypointWalk();
       bot.playAlarm?.(); // one alert per verification, if browser audio was unlocked
-      bot.log("cave paused for verification notice", { notice });
+      bot.log("cave paused for verification notice", { notice: notice.text });
     } catch (error) {
       bot.log("verification notice check failed", error?.message || error);
     }
@@ -1529,7 +1543,7 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     // Explicit operator decision: a chat notice can remain in the message
     // history after the challenge has ended. Don't let that old text trap the
     // route permanently; a different/new notice can still pause it again.
-    state.ignoredVerificationNotice = findVisibleVerificationNotice();
+    state.ignoredVerificationNotice = findVisibleVerificationNotice()?.key || null;
     state.pausedForVerification = false;
     state.lastVerificationNotice = null;
     state.lastPathAt = 0;
