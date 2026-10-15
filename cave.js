@@ -65,9 +65,11 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
       maxChaseFromRouteTiles: 6,
       autoSellerVisit: false,
       sellerPresetName: "",
+      sellerReturnPresetName: "",
       minimumFreeCapacity: 50,
       sellerFightOutbound: false,
       sellerFightReturn: false,
+      useWaypointTools: true, // rope and shovel for deliberate waypoint floor changes
       pauseWaypointsOnVerification: false, // opt-in, never pauses auto-attack or auto-heal
       verificationScanTickMs: 500,
       enabled: false,
@@ -82,9 +84,11 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
   config.maxChaseFromRouteTiles = Math.max(2, Math.min(20, Math.trunc(Number(config.maxChaseFromRouteTiles) || 6)));
   config.autoSellerVisit = config.autoSellerVisit === true;
   config.sellerPresetName = String(config.sellerPresetName || "").trim();
+  config.sellerReturnPresetName = String(config.sellerReturnPresetName || "").trim();
   config.minimumFreeCapacity = Math.max(1, Math.min(10000, Number(config.minimumFreeCapacity) || 50));
   config.sellerFightOutbound = config.sellerFightOutbound === true;
   config.sellerFightReturn = config.sellerFightReturn === true;
+  config.useWaypointTools = config.useWaypointTools !== false;
   config.pauseWaypointsOnVerification = config.pauseWaypointsOnVerification === true;
   config.verificationScanTickMs = Math.max(200, Math.min(5000, Math.round(Number(config.verificationScanTickMs) || 500)));
 
@@ -987,7 +991,10 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     let best = null;
     let bestScore = Number.POSITIVE_INFINITY;
 
-    const sellerTransitions = state.sellerTrip?.sellerTransitions || [];
+    const sellerTransitions = [
+      ...(state.sellerTrip?.sellerTransitions || []),
+      ...(state.sellerTrip?.returnTransitions || []),
+    ];
     [...transitions, ...sellerTransitions].forEach((transition) => {
       if (transition.from.z !== position.z || transition.to.z !== waypoint.z) {
         return;
@@ -1332,12 +1339,12 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
       return true;
     }
 
-    if (waypoint?.z < position.z && isRopeTargetTile(targetTile)) {
+    if (config.useWaypointTools && waypoint?.z < position.z && isRopeTargetTile(targetTile)) {
       return useRopeOnTile(targetTile, targetPosition, now);
     }
 
     if (!isFloorChangeTile(targetTile)) {
-      if (waypoint?.z > position.z && isShovelTargetTile(targetTile)) {
+      if (config.useWaypointTools && waypoint?.z > position.z && isShovelTargetTile(targetTile)) {
         return useShovelOnTile(targetTile, targetPosition, now);
       }
       return false;
@@ -1573,13 +1580,12 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     }, config.tickMs);
   }
 
-  // Automated navigation to a configured seller waypoint route. This deliberately
-  // DOES NOT issue a sell transaction: the game shop packet is not validated.
-  // Operator must confirm the sale before reverse navigation starts.
+  // Seller navigation is independent from the optional Auto Sell module.
+  // If Auto Sell is OFF or needs attention, wait for operator confirmation.
   function getSellerTripStatus() {
     const trip = state.sellerTrip;
     return trip ? { phase: trip.phase, index: trip.index,
-      sellerPresetName: trip.sellerPresetName, attackWasRunning: trip.attackWasRunning,
+      sellerPresetName: trip.sellerPresetName, returnPresetName: trip.returnPresetName, attackWasRunning: trip.attackWasRunning,
       combatEnabled: isSellerEscortCombatEnabled(trip),
       sellerWaypoints: trip.sellerRoute.length } : null;
   }
@@ -1614,7 +1620,7 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     if (!isSellerEscortCombatEnabled(trip)) return null;
     // Keeps the existing route leash, extended across the planned seller
     // corridor. We never allow arbitrarily long pursuits across the map.
-    return [...route, ...trip.sellerRoute].map((point) => cloneValue(point));
+    return [...route, ...trip.sellerRoute, ...(trip.returnRoute || [])].map((point) => cloneValue(point));
   }
 
   function beginSellerTrip(force = false) {
@@ -1639,17 +1645,27 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     const attackWasRunning = !!bot.attack?.status?.()?.running;
     const floorMoveWasRunning = !!bot.floorMove?.status?.()?.running;
     if (floorMoveWasRunning) bot.floorMove.stop({ persistEnabled: false });
+    const returnPreset = config.sellerReturnPresetName ? getPresetByName(config.sellerReturnPresetName) : null;
+    if (config.sellerReturnPresetName && (!returnPreset || returnPreset.route.length < 2 ||
+        !isSameTile(returnPreset.route[0], preset.route[preset.route.length - 1]) ||
+        !isSameTile(returnPreset.route[returnPreset.route.length - 1], route[0]))) {
+      bot.log("seller trip rejected: return route must begin at seller and end at first hunt waypoint");
+      return false;
+    }
     state.sellerTrip = {
       phase: "exit-hunt", index: findClosestWaypointIndex(pos),
       sellerRoute: preset.route.map((waypoint) => cloneValue(waypoint)),
       sellerTransitions: preset.transitions.map((entry) => cloneValue(entry)),
+      returnRoute: returnPreset?.route?.map((point) => cloneValue(point)) || null,
+      returnTransitions: returnPreset?.transitions?.map((entry) => cloneValue(entry)) || [],
+      returnPresetName: returnPreset?.name || "",
       sellerPresetName: preset.name, attackWasRunning, floorMoveWasRunning,
       lastCombatMode: null, combatPaused: false, lastCombatSeenAt: 0,
     };
     syncSellerEscortCombat(state.sellerTrip);
     state.lastWaypointWalkDestinationKey = null;
     state.lastPathAt = 0;
-    bot.log("seller trip started; combat according to escort settings; no auto-sell enabled", {
+    bot.log("seller trip started; optional Auto Sell handled separately", {
       freeCapacity, threshold: config.minimumFreeCapacity, preset: preset.name,
     });
     return true;
@@ -1674,7 +1690,7 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     if (!trip || trip.phase !== "waiting-at-seller") return false;
     trip.phase = "seller-return";
     syncSellerEscortCombat(trip);
-    trip.index = trip.sellerRoute.length - 2;
+    trip.index = trip.returnRoute ? 1 : trip.sellerRoute.length - 2;
     state.lastPathAt = 0;
     state.lastWaypointWalkDestinationKey = null;
     bot.log("seller visit confirmed by operator; returning to hunting zone");
@@ -1725,8 +1741,9 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
         bot.log("seller escort resumed waypoint navigation");
       }
     }
+    const currentReturnRoute = trip.returnRoute || trip.sellerRoute;
     let destination = trip.phase === "exit-hunt" ? route[trip.index] :
-      trip.sellerRoute[trip.index];
+      trip.phase === "seller-return" ? currentReturnRoute[trip.index] : trip.sellerRoute[trip.index];
     if (!destination) {
       bot.log("seller trip invalid waypoint; aborting to prevent unsafe navigation");
       cancelSellerTrip();
@@ -1740,18 +1757,23 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
         if (trip.index === trip.sellerRoute.length - 1) {
           trip.phase = "waiting-at-seller";
           syncSellerEscortCombat(trip);
-          bot.log("arrived at seller: SELL MANUALLY, then press Confirm Sale & Return");
+          bot.log("arrived at seller: optional Auto Sell starts when enabled, otherwise sell manually");
           return true;
         }
         trip.index += 1;
       } else if (trip.phase === "seller-return") {
-        if (trip.index === 0) { finishSellerTrip(); return true; }
-        trip.index -= 1;
+        if (trip.returnRoute) {
+          if (trip.index >= trip.returnRoute.length - 1) { finishSellerTrip(); return true; }
+          trip.index += 1;
+        } else {
+          if (trip.index === 0) { finishSellerTrip(); return true; }
+          trip.index -= 1;
+        }
       }
       state.lastPathAt = 0;
       state.lastWaypointWalkDestinationKey = null;
       destination = trip.phase === "exit-hunt" ? route[trip.index] :
-        trip.sellerRoute[trip.index];
+        trip.phase === "seller-return" ? currentReturnRoute[trip.index] : trip.sellerRoute[trip.index];
     }
     // Reuse the same learned stair/hole handling as intentional Cave Bot routes.
     if (destination?.z !== position.z) {
@@ -1802,6 +1824,8 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
       }
       // Supply-return route has priority over the hunting route and combat.
       if (processSellerTrip(position, now)) return;
+      // Hold the route only while a corpse item transfer is waiting for confirmation.
+      if (bot.corpseLoot?.isBusy?.()) { cancelOwnWaypointWalk(); return; }
       const attackStatus = bot.attack?.status?.() || null;
       const priorityEnabled = config.prioritizeMonsters === true &&
         !!attackStatus?.running && !!attackStatus?.config?.enabled;
@@ -1986,6 +2010,7 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     }
     state.pausedForCombat = false;
     const abandonedSellerTrip = state.sellerTrip;
+    cancelOwnWaypointWalk();
     state.sellerTrip = null;
     if (abandonedSellerTrip?.attackWasRunning && !bot.attack?.status?.()?.running) {
       bot.attack?.start?.();
@@ -2123,9 +2148,11 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     config.maxChaseFromRouteTiles = Math.max(2, Math.min(20, Math.trunc(Number(config.maxChaseFromRouteTiles) || 6)));
     config.autoSellerVisit = config.autoSellerVisit === true;
     config.sellerPresetName = String(config.sellerPresetName || "").trim();
+    config.sellerReturnPresetName = String(config.sellerReturnPresetName || "").trim();
     config.minimumFreeCapacity = Math.max(1, Math.min(10000, Number(config.minimumFreeCapacity) || 50));
     config.sellerFightOutbound = config.sellerFightOutbound === true;
     config.sellerFightReturn = config.sellerFightReturn === true;
+    config.useWaypointTools = config.useWaypointTools !== false;
     config.pauseWaypointsOnVerification = config.pauseWaypointsOnVerification === true;
     config.verificationScanTickMs = Math.max(200, Math.min(5000, Math.round(Number(config.verificationScanTickMs) || 500)));
     config.tickMs = 500;

@@ -8,6 +8,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
   function destroy() {
     document.getElementById("minibia-bot-panel")?.remove();
     document.getElementById("minibia-bot-style")?.remove();
+    document.getElementById("minibia-bot-emergency-stop")?.remove();
   }
 
   function savePanelPosition(position, key = panelPositionKey) {
@@ -1051,6 +1052,23 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
         }
       }
     `;
+    style.textContent += `
+      #minibia-bot-panel .mb-quick-bar { grid-column: 1 / -1; grid-row: auto; padding: 12px; border: 1px solid #b09253; border-radius: 10px; background: rgba(73,55,31,.65); display:grid; gap:7px; }
+      #minibia-bot-panel .mb-quick-bar label { display:grid; gap:4px; }
+      #minibia-bot-panel .mb-quick-actions { display:grid; grid-template-columns: 1fr 1fr; gap:8px; }
+      #minibia-bot-panel .mb-quick-actions button { font-weight:bold; }
+      #minibia-bot-panel .mb-fold { min-width:0; border:1px solid rgba(224,200,148,.20); border-radius:8px; margin:0 0 7px; padding:7px; }
+      #minibia-bot-panel .mb-fold summary { cursor:pointer; color:#e9d6a4; font-weight:700; padding:4px; }
+      #minibia-bot-panel .mb-fold[open] summary { border-bottom:1px solid rgba(224,200,148,.18); margin-bottom:8px; }
+      #minibia-bot-panel .mb-fold .mb-section { border:0; }
+      #minibia-bot-emergency-stop { position:fixed; bottom:18px; left:18px; z-index:2147483647;
+        border:2px solid #fff; border-radius:10px; padding:12px 17px; background:#ac2020; color:#fff;
+        font:700 13px Verdana,sans-serif; box-shadow:0 4px 15px #000b; cursor:pointer; }
+      #minibia-bot-emergency-stop:hover { background:#e02424; }
+      #minibia-bot-panel #minibia-bot-auto-sell-items { min-height:58px; resize:vertical; }
+      @container (max-width:1060px) { #minibia-bot-panel .mb-quick-bar { grid-column:1 / -1; grid-row: 1; }
+        #minibia-bot-panel .mb-cave-column {grid-row:2;} #minibia-bot-panel .mb-side-column {grid-row:2;} #minibia-bot-panel .mb-main-column {grid-row:3;} }
+    `;
     document.head.appendChild(style);
 
     const panel = document.createElement("div");
@@ -1252,6 +1270,12 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
               <button type="button" class="mb-small-button" id="minibia-bot-floor-move-scan">Scan visible tiles</button>
               <div class="mb-small-note" id="minibia-bot-floor-move-status">Off</div>
               <div class="mb-small-note">Scans on-screen tiles on the current floor. If walking is enabled, approaches safely and moves one matching item to a free adjacent tile; never picks it up. Combat takes precedence.</div>
+              <div class="mb-label">Auto Loot Corpses (experimental)</div>
+              <label class="mb-toggle"><input type="checkbox" id="minibia-bot-corpse-loot-enabled"/><span>Auto Loot Corpses</span></label>
+              <label class="mb-field"><span class="mb-field-label">Only these loot items (exact names or IDs)</span>
+                <textarea id="minibia-bot-corpse-loot-items" rows="3" placeholder="plate shield, chain armor, brass armor"></textarea></label>
+              <div class="mb-small-note">First enable Auto Open Corpse in Minibia. Equip a backpack. Moves whitelisted items ONLY from nearby recognized opened corpse windows (2 tiles). Does not yet open or walk to corpses. Default OFF.</div>
+              <div class="mb-small-note" id="minibia-bot-corpse-loot-status">Auto Loot Corpses: off</div>
             </div>
           </div>
         </div>
@@ -1288,16 +1312,30 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
                 <input type="number" id="minibia-bot-cave-max-chase" min="2" max="20" step="1" value="6" />
               </label>
               <div class="mb-small-note">Only with Cave Bot running and Melee Mode on. Stop chasing beyond the radius and resume waypoints. Add intermediate waypoints along long corridors.</div>
+              <label class="mb-toggle"><input type="checkbox" id="minibia-bot-cave-tools"/><span>Use shovel / rope on waypoint floor changes</span></label>
+              <div class="mb-small-note">Only deliberate waypoint transitions; not melee pursuit.</div>
               <div class="mb-label">Seller Return (capacity)</div>
               <label class="mb-toggle"><input type="checkbox" id="minibia-bot-seller-enabled"/><span>Return to seller on low capacity</span></label>
               <label class="mb-field" for="minibia-bot-seller-cap"><span class="mb-field-label">Free capacity threshold (oz)</span>
                 <input id="minibia-bot-seller-cap" type="number" min="1" max="10000" value="50" /></label>
               <label class="mb-field" for="minibia-bot-seller-route"><span class="mb-field-label">Seller route (saved preset)</span>
                 <select id="minibia-bot-seller-route"><option value="">Select a route</option></select></label>
+              <label class="mb-field" for="minibia-bot-seller-return-route"><span class="mb-field-label">Return route (optional: NPC to hunt)</span>
+                <select id="minibia-bot-seller-return-route"><option value="">Reverse seller route</option></select></label>
               <label class="mb-toggle"><input type="checkbox" id="minibia-bot-seller-fight-outbound"/><span>Fight while going to seller</span></label>
               <label class="mb-toggle"><input type="checkbox" id="minibia-bot-seller-fight-return"/><span>Fight while returning to hunt</span></label>
               <div class="mb-small-note">Escort combat is available only if Auto Attack was running when the trip started. Waypoints pause while fighting. Both options start OFF. Auto Heal remains independent.</div>
-              <div class="mb-small-note">Record a separate route from the FIRST hunting waypoint to the seller, including every corridor and floor transition. Hunting pauses at the NPC. Selling is MANUAL until shop protocol is validated.</div>
+              <div class="mb-small-note">Seller route: first hunt waypoint → NPC. Optional Return Route: NPC → first hunt waypoint. Include every stair transition deliberately.</div>
+              <div class="mb-label">Auto Sell (experimental; OFF by default)</div>
+              <label class="mb-toggle"><input type="checkbox" id="minibia-bot-auto-sell-enabled"/><span>Enable verified NPC sales</span></label>
+              <label class="mb-field"><span class="mb-field-label">NPC name (exact)</span>
+                <input id="minibia-bot-auto-sell-npc" type="text" placeholder="Shanar" /></label>
+              <label class="mb-field"><span class="mb-field-label">Allowed item names (comma or newline separated)</span>
+                <textarea id="minibia-bot-auto-sell-items" rows="3" placeholder="plate shield, chain armor, brass armor"></textarea></label>
+              <label class="mb-toggle"><input type="checkbox" id="minibia-bot-auto-sell-return"/><span>Return to hunt after verified sales</span></label>
+              <button type="button" class="mb-small-button" id="minibia-bot-auto-sell-test">Sell now (at NPC) — experimental</button>
+              <div class="mb-small-note">Only items inside OPEN backpacks are counted. Equipped items never sold. Server inventory change must be confirmed. If uncertain, stop at NPC for manual attention. Test one cheap item first.</div>
+              <div class="mb-small-note" id="minibia-bot-auto-sell-status">Auto Sell: disabled</div>
               <div class="mb-actions mb-actions-inline-two">
                 <button type="button" class="mb-small-button" id="minibia-bot-seller-confirm">Confirm Sale &amp; Return</button>
                 <button type="button" class="mb-small-button" id="minibia-bot-seller-abort">Abort Trip</button>
@@ -1363,6 +1401,100 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
       <div class="mb-resize-handle" id="minibia-bot-resize" role="separator" aria-label="Resize Minibia Bot panel" title="Drag to resize">◢</div>
     `;
     document.body.appendChild(panel);
+
+    // Move existing sections into collapsible groups WITHOUT recreating inputs,
+    // their IDs, values, or change listeners. Quick actions are always on top.
+    const quickBar = document.createElement("div");
+    quickBar.className = "mb-quick-bar";
+    quickBar.innerHTML = `
+      <strong>QUICK HUNT CONTROL</strong>
+      <label>Hunt route <select id="minibia-bot-quick-route"></select></label>
+      <label class="mb-toggle"><input id="minibia-bot-quick-prioritize" type="checkbox" checked /> Prioritize Monsters</label>
+      <div class="mb-quick-actions">
+        <button id="minibia-bot-quick-start" type="button">START HUNT</button>
+        <button id="minibia-bot-quick-stop" type="button">STOP HUNT</button>
+      </div>
+      <div class="mb-small-note" id="minibia-bot-quick-status">Stopped. Saves the selected route; does not auto-start on login.</div>`;
+    panel.querySelector(".mb-body")?.prepend(quickBar);
+    function foldSections(columnClass, titleFor) {
+      const column = panel.querySelector(columnClass);
+      if (!column) return;
+      Array.from(column.children).forEach((section, idx) => {
+        if (!section.classList.contains("mb-column-section")) return;
+        const title = titleFor(section, idx);
+        if (!title) return;
+        const details = document.createElement("details");
+        details.className = "mb-fold";
+        const summary = document.createElement("summary");
+        summary.textContent = title;
+        details.append(summary, section);
+        column.append(details);
+      });
+    }
+    foldSections(".mb-cave-column", (s) => s.querySelector(".mb-label")?.textContent === "Auto Attack" ? "Combat / Auto Attack (advanced)" : "Waypoints / Seller / Auto Sell");
+    foldSections(".mb-side-column", (s) => ({"Xray":"Utility / Xray", "Auto Heal":"Survival / Auto Heal", "Talk":"Communication / Gemini", "Move Floor Items":"Loot / Floor Items"})[s.querySelector(".mb-label")?.textContent] || "More options");
+    foldSections(".mb-main-column", (s, i) => s.querySelector(".mb-label")?.textContent || (i === 0 ? "Reload Bot" : "Other utilities"));
+    const emergencyButton = document.createElement("button");
+    emergencyButton.id = "minibia-bot-emergency-stop";
+    emergencyButton.textContent = "EMERGENCY STOP";
+    emergencyButton.title = "Immediately stop bot automation (Ctrl+Shift+X)";
+    document.body.appendChild(emergencyButton);
+    emergencyButton.addEventListener("click", () => bot.emergencyStop?.());
+    const emergencyHotkey = (event) => {
+      if (event.ctrlKey && event.shiftKey && event.code === "KeyX") {
+        event.preventDefault(); event.stopImmediatePropagation(); bot.emergencyStop?.();
+      }
+    };
+    window.addEventListener("keydown", emergencyHotkey, true);
+    bot.addCleanup(() => { emergencyButton.remove(); window.removeEventListener("keydown", emergencyHotkey, true); });
+
+    const quickRoute = quickBar.querySelector("#minibia-bot-quick-route");
+    const quickStart = quickBar.querySelector("#minibia-bot-quick-start");
+    const quickStop = quickBar.querySelector("#minibia-bot-quick-stop");
+    const quickPrioritize = quickBar.querySelector("#minibia-bot-quick-prioritize");
+    const quickStatus = quickBar.querySelector("#minibia-bot-quick-status");
+    function refreshQuickRoutes() {
+      const names = bot.cave?.getPresetNames?.() || [];
+      const selected = quickRoute.value || bot.storage.get("minibiaBot.quick.route", "") || bot.cave?.getActivePresetName?.();
+      if (quickRoute.options.length !== names.length || names.some((n,i) => quickRoute.options[i]?.value !== n)) {
+        quickRoute.replaceChildren();
+        for (const name of names) {
+          const option = document.createElement("option"); option.value=name; option.textContent=name; quickRoute.append(option);
+        }
+        if (names.includes(selected)) quickRoute.value = selected;
+      }
+      quickStart.disabled = !names.length;
+      quickStatus.textContent = bot.cave?.status?.()?.running ? "Hunt active" : "Hunt stopped (manual control)";
+    }
+    quickRoute.addEventListener("change", () => bot.storage.set("minibiaBot.quick.route", quickRoute.value));
+    quickPrioritize.checked = bot.storage.get("minibiaBot.quick.prioritize", true) !== false;
+    quickPrioritize.addEventListener("change", () => {
+      bot.storage.set("minibiaBot.quick.prioritize", quickPrioritize.checked);
+      bot.cave?.updateConfig?.({prioritizeMonsters: quickPrioritize.checked});
+    });
+    quickStart.addEventListener("click", () => {
+      const name = quickRoute.value;
+      if (!name || !bot.cave?.loadPreset?.(name)) {
+        quickStatus.textContent = "Could not load selected route"; return;
+      }
+      bot.storage.set("minibiaBot.quick.route", name);
+      bot.storage.set("minibiaBot.emergencyStop", false);
+      bot.cave.updateConfig({ prioritizeMonsters: quickPrioritize.checked });
+      const wasAttacking = bot.attack?.status?.()?.running;
+      if (!wasAttacking) bot.attack?.start?.();
+      if (!bot.cave?.start?.()) {
+        if (!wasAttacking) bot.attack?.stop?.();
+        quickStatus.textContent = "Failed to start Cave Bot"; return;
+      }
+      quickStatus.textContent = "Hunt started: " + name;
+    });
+    quickStop.addEventListener("click", () => {
+      bot.cave?.stop?.(); bot.attack?.stop?.();
+      quickStatus.textContent = "Hunt stopped; other utilities still active";
+    });
+    refreshQuickRoutes();
+    const quickRefreshTimer = window.setInterval(refreshQuickRoutes, 1800);
+    bot.addCleanup(() => window.clearInterval(quickRefreshTimer));
 
     const unlockAudio = () => {
       bot.unlockAudio?.();
@@ -1431,11 +1563,19 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     const sellerEnabledInput = panel.querySelector("#minibia-bot-seller-enabled");
     const sellerCapInput = panel.querySelector("#minibia-bot-seller-cap");
     const sellerRouteSelect = panel.querySelector("#minibia-bot-seller-route");
+    const sellerReturnRouteSelect = panel.querySelector("#minibia-bot-seller-return-route");
+    const autoSellEnabled = panel.querySelector("#minibia-bot-auto-sell-enabled");
+    const autoSellNpc = panel.querySelector("#minibia-bot-auto-sell-npc");
+    const autoSellItems = panel.querySelector("#minibia-bot-auto-sell-items");
+    const autoSellReturn = panel.querySelector("#minibia-bot-auto-sell-return");
+    const autoSellStatus = panel.querySelector("#minibia-bot-auto-sell-status");
+    const autoSellTest = panel.querySelector("#minibia-bot-auto-sell-test");
     const sellerFightOutboundInput = panel.querySelector("#minibia-bot-seller-fight-outbound");
     const sellerFightReturnInput = panel.querySelector("#minibia-bot-seller-fight-return");
     const sellerConfirmButton = panel.querySelector("#minibia-bot-seller-confirm");
     const sellerAbortButton = panel.querySelector("#minibia-bot-seller-abort");
     const sellerStatusLabel = panel.querySelector("#minibia-bot-seller-status");
+    const caveToolsInput = panel.querySelector("#minibia-bot-cave-tools");
     const caveLimitChaseInput = panel.querySelector("#minibia-bot-cave-limit-chase");
     const caveMaxChaseInput = panel.querySelector("#minibia-bot-cave-max-chase");
     const caveVerificationPauseInput = panel.querySelector("#minibia-bot-cave-verification-pause");
@@ -1639,6 +1779,10 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
       });
     }
 
+    if (caveToolsInput) {
+      caveToolsInput.checked = bot.cave?.config?.useWaypointTools !== false;
+      caveToolsInput.addEventListener("change", () => bot.cave?.updateConfig?.({ useWaypointTools: caveToolsInput.checked }));
+    }
     if (caveLimitChaseInput) {
       caveLimitChaseInput.checked = bot.cave?.config?.limitChaseToRoute === true;
       caveLimitChaseInput.addEventListener("change", () => {
@@ -1658,6 +1802,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
 
     function refreshSellerRouteOptions() {
       if (!sellerRouteSelect) return;
+      const returnValue = String(bot.cave?.config?.sellerReturnPresetName || "");
       const value = String(bot.cave?.config?.sellerPresetName || "");
       const names = bot.cave?.getPresetNames?.() || [];
       sellerRouteSelect.replaceChildren();
@@ -1670,6 +1815,17 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
         sellerRouteSelect.append(item);
       }
       sellerRouteSelect.value = names.includes(value) ? value : "";
+      if (sellerReturnRouteSelect) {
+        sellerReturnRouteSelect.replaceChildren();
+        const reversed = document.createElement("option");
+        reversed.value = ""; reversed.textContent = "Reverse seller route";
+        sellerReturnRouteSelect.append(reversed);
+        for (const name of names) {
+          const item = document.createElement("option"); item.value = name; item.textContent = name;
+          sellerReturnRouteSelect.append(item);
+        }
+        sellerReturnRouteSelect.value = names.includes(returnValue) ? returnValue : "";
+      }
     }
     function refreshSellerStatus() {
       const trip = bot.cave?.getSellerTripStatus?.();
@@ -1698,6 +1854,8 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
         bot.cave?.updateConfig?.({sellerPresetName: sellerRouteSelect.value});
       });
     }
+    if (sellerReturnRouteSelect) sellerReturnRouteSelect.addEventListener("change", () =>
+      bot.cave?.updateConfig?.({sellerReturnPresetName:sellerReturnRouteSelect.value}));
     for (const [input, key] of [
       [sellerFightOutboundInput, "sellerFightOutbound"],
       [sellerFightReturnInput, "sellerFightReturn"],
@@ -1715,6 +1873,20 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     if (sellerAbortButton) sellerAbortButton.addEventListener("click", () => {
       bot.cave?.cancelSellerTrip?.(); refreshSellerStatus();
     });
+    if (autoSellEnabled) {
+      autoSellEnabled.checked = bot.autoSell?.config?.enabled === true;
+      autoSellNpc.value = bot.autoSell?.config?.npcName || "Shanar";
+      autoSellItems.value = bot.autoSell?.config?.allowedItems || "";
+      autoSellReturn.checked = bot.autoSell?.config?.autoReturnAfterSale === true;
+      autoSellEnabled.addEventListener("change", () => bot.autoSell?.updateConfig?.({enabled:autoSellEnabled.checked}));
+      autoSellNpc.addEventListener("change", () => bot.autoSell?.updateConfig?.({npcName:autoSellNpc.value}));
+      autoSellItems.addEventListener("change", () => bot.autoSell?.updateConfig?.({allowedItems:autoSellItems.value}));
+      autoSellReturn.addEventListener("change", () => bot.autoSell?.updateConfig?.({autoReturnAfterSale:autoSellReturn.checked}));
+      autoSellTest?.addEventListener("click", () => {
+        bot.autoSell?.updateConfig?.({ npcName:autoSellNpc.value, allowedItems:autoSellItems.value });
+        bot.autoSell?.testAtNpc?.();
+      });
+    }
     refreshSellerStatus();
     const sellerUiRefreshId = window.setInterval(() => {
       if (document.getElementById("minibia-bot-panel") !== panel) {
@@ -1722,6 +1894,9 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
         return;
       }
       refreshSellerStatus();
+      const sell = bot.autoSell?.status?.();
+      if (autoSellStatus && sell) autoSellStatus.textContent =
+        `Auto Sell: ${sell.phase} · confirmed units ${sell.sold}${sell.pauseReason ? " · " + sell.pauseReason : ""}`;
       if ((bot.cave?.getPresetNames?.() || []).length !== (sellerRouteSelect?.options?.length ?? 1) - 1) refreshSellerRouteOptions();
     }, 1000);
 
@@ -1986,6 +2161,24 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
       });
     }
 
+    const corpseToggle = panel.querySelector("#minibia-bot-corpse-loot-enabled");
+    const corpseItems = panel.querySelector("#minibia-bot-corpse-loot-items");
+    const corpseStatus = panel.querySelector("#minibia-bot-corpse-loot-status");
+    if (corpseToggle && corpseItems && corpseStatus) {
+      const refreshCorpseStatus = () => {
+        const st = bot.corpseLoot?.status?.();
+        corpseToggle.checked = !!st?.running;
+        corpseStatus.textContent = st ? `Collected: ${st.moved} | ${st.reason}` : "Module unavailable";
+      };
+      corpseItems.value = bot.corpseLoot?.config?.items || "";
+      corpseItems.addEventListener("change", () => {bot.corpseLoot?.updateConfig?.({items:corpseItems.value}); refreshCorpseStatus();});
+      corpseToggle.addEventListener("change", () => {
+        bot.corpseLoot?.updateConfig?.({items:corpseItems.value,enabled:corpseToggle.checked});refreshCorpseStatus();
+      });
+      const corpseTimer = window.setInterval(refreshCorpseStatus, 1200);
+      bot.addCleanup(() => window.clearInterval(corpseTimer));
+      refreshCorpseStatus();
+    }
     if (floorMoveToggle && floorMoveItems && floorMoveStatus) {
       const floorStatus = bot.floorMove.status();
       floorMoveItems.value = floorStatus.config.items || "";

@@ -15,6 +15,9 @@ cat \
   src/modules/equip-ring.js \
   src/modules/auto-eat.js \
   src/modules/talk.js \
+  src/modules/floor-move.js \
+  src/modules/corpse-loot.js \
+  src/modules/auto-sell.js \
   src/ui/panel.js \
   src/main.js \
   > pz-bot.js
