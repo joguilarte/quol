@@ -47,6 +47,8 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     lastRouteRecoveryWarningAt: 0,
     combatPauseStartedAt: 0,
     combatYieldUntil: 0,
+    sellerTrip: null, // transient: not persisted across reload
+    sellerTripCooldownUntil: 0,
   };
   const minimapOverlayState = {
     timerId: null,
@@ -61,6 +63,11 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
       prioritizeMonsters: false, // opt-in: pause waypoint navigation during fights
       limitChaseToRoute: false, // opt-in: do not chase mobs outside recorded route area
       maxChaseFromRouteTiles: 6,
+      autoSellerVisit: false,
+      sellerPresetName: "",
+      minimumFreeCapacity: 50,
+      sellerFightOutbound: false,
+      sellerFightReturn: false,
       pauseWaypointsOnVerification: false, // opt-in, never pauses auto-attack or auto-heal
       verificationScanTickMs: 500,
       enabled: false,
@@ -73,6 +80,11 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
   config.autoRecoverWaypoints = config.autoRecoverWaypoints !== false;
   config.limitChaseToRoute = config.limitChaseToRoute === true;
   config.maxChaseFromRouteTiles = Math.max(2, Math.min(20, Math.trunc(Number(config.maxChaseFromRouteTiles) || 6)));
+  config.autoSellerVisit = config.autoSellerVisit === true;
+  config.sellerPresetName = String(config.sellerPresetName || "").trim();
+  config.minimumFreeCapacity = Math.max(1, Math.min(10000, Number(config.minimumFreeCapacity) || 50));
+  config.sellerFightOutbound = config.sellerFightOutbound === true;
+  config.sellerFightReturn = config.sellerFightReturn === true;
   config.pauseWaypointsOnVerification = config.pauseWaypointsOnVerification === true;
   config.verificationScanTickMs = Math.max(200, Math.min(5000, Math.round(Number(config.verificationScanTickMs) || 500)));
 
@@ -975,7 +987,8 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     let best = null;
     let bestScore = Number.POSITIVE_INFINITY;
 
-    transitions.forEach((transition) => {
+    const sellerTransitions = state.sellerTrip?.sellerTransitions || [];
+    [...transitions, ...sellerTransitions].forEach((transition) => {
       if (transition.from.z !== position.z || transition.to.z !== waypoint.z) {
         return;
       }
@@ -1560,6 +1573,196 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     }, config.tickMs);
   }
 
+  // Automated navigation to a configured seller waypoint route. This deliberately
+  // DOES NOT issue a sell transaction: the game shop packet is not validated.
+  // Operator must confirm the sale before reverse navigation starts.
+  function getSellerTripStatus() {
+    const trip = state.sellerTrip;
+    return trip ? { phase: trip.phase, index: trip.index,
+      sellerPresetName: trip.sellerPresetName, attackWasRunning: trip.attackWasRunning,
+      combatEnabled: isSellerEscortCombatEnabled(trip),
+      sellerWaypoints: trip.sellerRoute.length } : null;
+  }
+
+  function isSellerEscortCombatEnabled(trip) {
+    if (!trip || !trip.attackWasRunning) return false;
+    if (trip.phase === "exit-hunt" || trip.phase === "seller-out") {
+      return config.sellerFightOutbound === true;
+    }
+    if (trip.phase === "seller-return") return config.sellerFightReturn === true;
+    return false; // Always peaceful while standing at the merchant.
+  }
+
+  // Only control Auto Attack when the desired travel phase changes. That keeps
+  // a manual user stop respected until the next phase transition.
+  function syncSellerEscortCombat(trip) {
+    if (!trip) return;
+    const shouldFight = isSellerEscortCombatEnabled(trip);
+    if (trip.lastCombatMode === shouldFight) return;
+    const isRunning = !!bot.attack?.status?.()?.running;
+    if (shouldFight && !isRunning) bot.attack?.start?.();
+    if (!shouldFight && isRunning) bot.attack?.stop?.({ persistEnabled: false });
+    trip.lastCombatMode = shouldFight;
+    trip.combatPaused = false;
+    trip.lastCombatSeenAt = 0;
+    state.lastPathAt = 0;
+    bot.log(`seller escort combat ${shouldFight ? "enabled" : "disabled"}`, { phase: trip.phase });
+  }
+
+  function getSellerEscortWaypoints() {
+    const trip = state.sellerTrip;
+    if (!isSellerEscortCombatEnabled(trip)) return null;
+    // Keeps the existing route leash, extended across the planned seller
+    // corridor. We never allow arbitrarily long pursuits across the map.
+    return [...route, ...trip.sellerRoute].map((point) => cloneValue(point));
+  }
+
+  function beginSellerTrip(force = false) {
+    if (!state.running || state.sellerTrip) return false;
+    if (!force && !config.autoSellerVisit) return false;
+    if (!force && Date.now() < state.sellerTripCooldownUntil) return false;
+    const preset = getPresetByName(config.sellerPresetName);
+    // The recorded seller route MUST begin at hunt route[0], otherwise a
+    // cross-floor or map-wide jump might be treated as a direct path.
+    const start = preset?.route?.[0];
+    if (!preset || preset.route.length < 2 || route.length < 2 ||
+        !start || !isSameTile(start, route[0]) ||
+        preset.name.toLowerCase() === getActivePresetName().toLowerCase()) {
+      if (force) bot.log("seller trip not configured: route must start at the first hunt waypoint");
+      return false;
+    }
+    const freeCapacity = Number(bot.getPlayerSnapshot?.()?.capacity);
+    if (!force && (!Number.isFinite(freeCapacity) ||
+        freeCapacity > config.minimumFreeCapacity)) return false;
+    const pos = normalizePosition(bot.getPlayerPosition());
+    if (!pos) return false;
+    const attackWasRunning = !!bot.attack?.status?.()?.running;
+    const floorMoveWasRunning = !!bot.floorMove?.status?.()?.running;
+    if (floorMoveWasRunning) bot.floorMove.stop({ persistEnabled: false });
+    state.sellerTrip = {
+      phase: "exit-hunt", index: findClosestWaypointIndex(pos),
+      sellerRoute: preset.route.map((waypoint) => cloneValue(waypoint)),
+      sellerTransitions: preset.transitions.map((entry) => cloneValue(entry)),
+      sellerPresetName: preset.name, attackWasRunning, floorMoveWasRunning,
+      lastCombatMode: null, combatPaused: false, lastCombatSeenAt: 0,
+    };
+    syncSellerEscortCombat(state.sellerTrip);
+    state.lastWaypointWalkDestinationKey = null;
+    state.lastPathAt = 0;
+    bot.log("seller trip started; combat according to escort settings; no auto-sell enabled", {
+      freeCapacity, threshold: config.minimumFreeCapacity, preset: preset.name,
+    });
+    return true;
+  }
+
+  function cancelSellerTrip() {
+    const trip = state.sellerTrip;
+    if (!trip) return false;
+    cancelOwnWaypointWalk();
+    state.sellerTrip = null;
+    state.sellerTripCooldownUntil = Date.now() + 60000;
+    state.needsRouteRejoinCheck = true;
+    state.lastPathAt = 0;
+    if (trip.attackWasRunning && !bot.attack?.status?.()?.running) bot.attack?.start?.();
+    if (trip.floorMoveWasRunning && !bot.floorMove?.status?.()?.running) bot.floorMove?.start?.();
+    bot.log("seller trip aborted; hunt resumed");
+    return true;
+  }
+
+  function resumeFromSeller() {
+    const trip = state.sellerTrip;
+    if (!trip || trip.phase !== "waiting-at-seller") return false;
+    trip.phase = "seller-return";
+    syncSellerEscortCombat(trip);
+    trip.index = trip.sellerRoute.length - 2;
+    state.lastPathAt = 0;
+    state.lastWaypointWalkDestinationKey = null;
+    bot.log("seller visit confirmed by operator; returning to hunting zone");
+    return true;
+  }
+
+  function finishSellerTrip() {
+    const trip = state.sellerTrip;
+    if (!trip) return;
+    state.sellerTrip = null;
+    state.sellerTripCooldownUntil = Date.now() + 60000;
+    state.currentIndex = 0;
+    state.direction = 1;
+    state.lastWaypointWalkDestinationKey = null;
+    state.lastPathAt = 0;
+    state.needsRouteRejoinCheck = false;
+    if (trip.attackWasRunning && !bot.attack?.status?.()?.running) bot.attack?.start?.();
+    if (trip.floorMoveWasRunning && !bot.floorMove?.status?.()?.running) bot.floorMove?.start?.();
+    bot.log("seller route return completed; normal hunting resumed");
+  }
+
+  function processSellerTrip(position, now) {
+    let trip = state.sellerTrip;
+    if (!trip) {
+      beginSellerTrip(false);
+      trip = state.sellerTrip;
+    }
+    if (!trip) return false;
+    syncSellerEscortCombat(trip);
+    if (trip.phase === "waiting-at-seller") return true;
+    if (isSellerEscortCombatEnabled(trip) && bot.attack?.status?.()?.running) {
+      const active = !!bot.attack.status().combatActive;
+      const monsters = !!bot.attack?.hasPriorityMonsters?.(now);
+      if (active || monsters) {
+        trip.lastCombatSeenAt = now;
+        if (!trip.combatPaused) {
+          trip.combatPaused = true;
+          cancelOwnWaypointWalk(); // Does not cancel Auto Attack-owned chase.
+          bot.log("seller escort paused for combat", { phase: trip.phase });
+        }
+        return true;
+      }
+      // Brief grace between respawns without walking one square after each kill.
+      if (trip.combatPaused && now - trip.lastCombatSeenAt < 900) return true;
+      if (trip.combatPaused) {
+        trip.combatPaused = false;
+        state.lastPathAt = 0;
+        bot.log("seller escort resumed waypoint navigation");
+      }
+    }
+    let destination = trip.phase === "exit-hunt" ? route[trip.index] :
+      trip.sellerRoute[trip.index];
+    if (!destination) {
+      bot.log("seller trip invalid waypoint; aborting to prevent unsafe navigation");
+      cancelSellerTrip();
+      return true;
+    }
+    if (isAtWaypoint(position, destination)) {
+      if (trip.phase === "exit-hunt") {
+        if (trip.index === 0) { trip.phase = "seller-out"; trip.index = 0; }
+        else trip.index -= 1;
+      } else if (trip.phase === "seller-out") {
+        if (trip.index === trip.sellerRoute.length - 1) {
+          trip.phase = "waiting-at-seller";
+          syncSellerEscortCombat(trip);
+          bot.log("arrived at seller: SELL MANUALLY, then press Confirm Sale & Return");
+          return true;
+        }
+        trip.index += 1;
+      } else if (trip.phase === "seller-return") {
+        if (trip.index === 0) { finishSellerTrip(); return true; }
+        trip.index -= 1;
+      }
+      state.lastPathAt = 0;
+      state.lastWaypointWalkDestinationKey = null;
+      destination = trip.phase === "exit-hunt" ? route[trip.index] :
+        trip.sellerRoute[trip.index];
+    }
+    // Reuse the same learned stair/hole handling as intentional Cave Bot routes.
+    if (destination?.z !== position.z) {
+      handleFloorChange(destination, now);
+    } else if (now - state.lastPathAt >= config.repathMs ||
+      now - state.lastProgressAt >= config.repathMs) {
+      goToWaypoint(destination);
+    }
+    return true;
+  }
+
   function tick() {
     if (!state.running) return;
 
@@ -1597,6 +1800,8 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
         state.needsRouteRejoinCheck = true;
         bot.log("cave recovered stale floor-item navigation pause");
       }
+      // Supply-return route has priority over the hunting route and combat.
+      if (processSellerTrip(position, now)) return;
       const attackStatus = bot.attack?.status?.() || null;
       const priorityEnabled = config.prioritizeMonsters === true &&
         !!attackStatus?.running && !!attackStatus?.config?.enabled;
@@ -1780,6 +1985,11 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
       persistConfig();
     }
     state.pausedForCombat = false;
+    const abandonedSellerTrip = state.sellerTrip;
+    state.sellerTrip = null;
+    if (abandonedSellerTrip?.attackWasRunning && !bot.attack?.status?.()?.running) {
+      bot.attack?.start?.();
+    }
     state.pausedForFloorMove = false;
     state.needsRouteRejoinCheck = false;
     state.combatPauseStartedAt = 0;
@@ -1900,6 +2110,8 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
       pausedForVerification: state.pausedForVerification && config.pauseWaypointsOnVerification,
       lastVerificationNotice: state.lastVerificationNotice,
       lastVerificationSeenAt: state.lastVerificationSeenAt,
+      sellerTrip: getSellerTripStatus(),
+      freeCapacity: Number(bot.getPlayerSnapshot?.()?.capacity) || null,
     };
   }
 
@@ -1909,6 +2121,11 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     config.autoRecoverWaypoints = config.autoRecoverWaypoints !== false;
     config.limitChaseToRoute = config.limitChaseToRoute === true;
     config.maxChaseFromRouteTiles = Math.max(2, Math.min(20, Math.trunc(Number(config.maxChaseFromRouteTiles) || 6)));
+    config.autoSellerVisit = config.autoSellerVisit === true;
+    config.sellerPresetName = String(config.sellerPresetName || "").trim();
+    config.minimumFreeCapacity = Math.max(1, Math.min(10000, Number(config.minimumFreeCapacity) || 50));
+    config.sellerFightOutbound = config.sellerFightOutbound === true;
+    config.sellerFightReturn = config.sellerFightReturn === true;
     config.pauseWaypointsOnVerification = config.pauseWaypointsOnVerification === true;
     config.verificationScanTickMs = Math.max(200, Math.min(5000, Math.round(Number(config.verificationScanTickMs) || 500)));
     config.tickMs = 500;
@@ -1939,6 +2156,11 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     status,
     updateConfig,
     resumeAfterVerification,
+    beginSellerTrip,
+    getSellerTripStatus,
+    getSellerEscortWaypoints,
+    resumeFromSeller,
+    cancelSellerTrip,
     setFloorMovePause,
     scanVerificationNotice,
     config,

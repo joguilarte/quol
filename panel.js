@@ -245,7 +245,11 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     const status = bot.cave?.status?.();
 
     if (statusLabel) {
-      if (!route.length) {
+      if (status?.sellerTrip?.phase === "waiting-at-seller") {
+        statusLabel.textContent = "At seller — sell manually; press Confirm Sale & Return";
+      } else if (status?.sellerTrip) {
+        statusLabel.textContent = `Seller trip: ${status.sellerTrip.phase} (${status.sellerTrip.index + 1})`;
+      } else if (!route.length) {
         statusLabel.textContent = "Status: no waypoints";
       } else if (status?.pausedForVerification) {
         statusLabel.textContent = "Status: paused for verification (Heal/Attack stay active)";
@@ -1284,6 +1288,21 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
                 <input type="number" id="minibia-bot-cave-max-chase" min="2" max="20" step="1" value="6" />
               </label>
               <div class="mb-small-note">Only with Cave Bot running and Melee Mode on. Stop chasing beyond the radius and resume waypoints. Add intermediate waypoints along long corridors.</div>
+              <div class="mb-label">Seller Return (capacity)</div>
+              <label class="mb-toggle"><input type="checkbox" id="minibia-bot-seller-enabled"/><span>Return to seller on low capacity</span></label>
+              <label class="mb-field" for="minibia-bot-seller-cap"><span class="mb-field-label">Free capacity threshold (oz)</span>
+                <input id="minibia-bot-seller-cap" type="number" min="1" max="10000" value="50" /></label>
+              <label class="mb-field" for="minibia-bot-seller-route"><span class="mb-field-label">Seller route (saved preset)</span>
+                <select id="minibia-bot-seller-route"><option value="">Select a route</option></select></label>
+              <label class="mb-toggle"><input type="checkbox" id="minibia-bot-seller-fight-outbound"/><span>Fight while going to seller</span></label>
+              <label class="mb-toggle"><input type="checkbox" id="minibia-bot-seller-fight-return"/><span>Fight while returning to hunt</span></label>
+              <div class="mb-small-note">Escort combat is available only if Auto Attack was running when the trip started. Waypoints pause while fighting. Both options start OFF. Auto Heal remains independent.</div>
+              <div class="mb-small-note">Record a separate route from the FIRST hunting waypoint to the seller, including every corridor and floor transition. Hunting pauses at the NPC. Selling is MANUAL until shop protocol is validated.</div>
+              <div class="mb-actions mb-actions-inline-two">
+                <button type="button" class="mb-small-button" id="minibia-bot-seller-confirm">Confirm Sale &amp; Return</button>
+                <button type="button" class="mb-small-button" id="minibia-bot-seller-abort">Abort Trip</button>
+              </div>
+              <div class="mb-small-note" id="minibia-bot-seller-status">Seller return: off</div>
               <label class="mb-toggle">
                 <input type="checkbox" id="minibia-bot-cave-verification-pause" />
                 <span>Pause waypoints on anti-bot notice</span>
@@ -1323,7 +1342,11 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
                   <option value="pathfinder">Bot pathfinding (avoid stairs)</option>
                 </select>
               </label>
-              <div class="mb-small-note">Hybrid: manually enabled Minibia Auto Chase takes priority; if it switches OFF, bot pathfinding follows safely as backup. Neither controller runs when Melee Mode is OFF. Native mode activates Safe Chase automatically; bot-only mode always uses pathfinding.</div>
+              <label class="mb-toggle">
+                <input type="checkbox" id="minibia-bot-auto-attack-avoid-stairs" />
+                <span>Strict stair protection (all pursuit modes)</span>
+              </label>
+              <div class="mb-small-note">When ON, safety overrides Hybrid/Native and uses only locally validated bot paths. The game's native chase/follow is turned OFF during automatic melee attacks. Intentional Cave Bot stair waypoints are unaffected. When OFF, the selected pursuit method works normally without guaranteed stair avoidance.</div>
               <label class="mb-field" for="minibia-bot-auto-attack-hotkey">
                 <span class="mb-field-label">Target Hotkey (1-12)</span>
                 <input type="number" id="minibia-bot-auto-attack-hotkey" min="1" max="12" placeholder="3" />
@@ -1375,6 +1398,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     const autoAttackEnabledInput = panel.querySelector("#minibia-bot-auto-attack-enabled");
     const autoAttackMeleeInput = panel.querySelector("#minibia-bot-auto-attack-melee");
     const autoAttackChaseController = panel.querySelector("#minibia-bot-auto-attack-chase-controller");
+    const autoAttackAvoidStairsInput = panel.querySelector("#minibia-bot-auto-attack-avoid-stairs");
     const autoAttackHotkeyInput = panel.querySelector("#minibia-bot-auto-attack-hotkey");
     const autoAttackRuneHotkeyInput = panel.querySelector("#minibia-bot-auto-attack-rune-hotkey");
     const floorMoveToggle = panel.querySelector("#minibia-bot-floor-move-enabled");
@@ -1404,6 +1428,14 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     const collapseButton = panel.querySelector("#minibia-bot-collapse");
     const reloadButton = panel.querySelector("#minibia-bot-reload");
     const cavePrioritizeMonstersInput = panel.querySelector("#minibia-bot-cave-prioritize-monsters");
+    const sellerEnabledInput = panel.querySelector("#minibia-bot-seller-enabled");
+    const sellerCapInput = panel.querySelector("#minibia-bot-seller-cap");
+    const sellerRouteSelect = panel.querySelector("#minibia-bot-seller-route");
+    const sellerFightOutboundInput = panel.querySelector("#minibia-bot-seller-fight-outbound");
+    const sellerFightReturnInput = panel.querySelector("#minibia-bot-seller-fight-return");
+    const sellerConfirmButton = panel.querySelector("#minibia-bot-seller-confirm");
+    const sellerAbortButton = panel.querySelector("#minibia-bot-seller-abort");
+    const sellerStatusLabel = panel.querySelector("#minibia-bot-seller-status");
     const caveLimitChaseInput = panel.querySelector("#minibia-bot-cave-limit-chase");
     const caveMaxChaseInput = panel.querySelector("#minibia-bot-cave-max-chase");
     const caveVerificationPauseInput = panel.querySelector("#minibia-bot-cave-verification-pause");
@@ -1624,6 +1656,75 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
       });
     }
 
+    function refreshSellerRouteOptions() {
+      if (!sellerRouteSelect) return;
+      const value = String(bot.cave?.config?.sellerPresetName || "");
+      const names = bot.cave?.getPresetNames?.() || [];
+      sellerRouteSelect.replaceChildren();
+      const empty = document.createElement("option");
+      empty.value = ""; empty.textContent = "Select a route";
+      sellerRouteSelect.append(empty);
+      for (const name of names) {
+        const item = document.createElement("option");
+        item.value = name; item.textContent = name;
+        sellerRouteSelect.append(item);
+      }
+      sellerRouteSelect.value = names.includes(value) ? value : "";
+    }
+    function refreshSellerStatus() {
+      const trip = bot.cave?.getSellerTripStatus?.();
+      if (sellerStatusLabel) sellerStatusLabel.textContent = trip
+        ? `Seller return: ${trip.phase}`
+        : `Seller return: ${bot.cave?.config?.autoSellerVisit ? "armed" : "off"}`;
+      if (sellerConfirmButton) sellerConfirmButton.disabled = trip?.phase !== "waiting-at-seller";
+      if (sellerAbortButton) sellerAbortButton.disabled = !trip;
+    }
+    if (sellerEnabledInput) {
+      sellerEnabledInput.checked = bot.cave?.config?.autoSellerVisit === true;
+      sellerEnabledInput.addEventListener("change", () => {
+        bot.cave?.updateConfig?.({autoSellerVisit: sellerEnabledInput.checked});
+        refreshSellerStatus();
+      });
+    }
+    if (sellerCapInput) {
+      sellerCapInput.value = String(bot.cave?.config?.minimumFreeCapacity ?? 50);
+      sellerCapInput.addEventListener("change", () => {
+        bot.cave?.updateConfig?.({minimumFreeCapacity: Number(sellerCapInput.value)});
+      });
+    }
+    if (sellerRouteSelect) {
+      refreshSellerRouteOptions();
+      sellerRouteSelect.addEventListener("change", () => {
+        bot.cave?.updateConfig?.({sellerPresetName: sellerRouteSelect.value});
+      });
+    }
+    for (const [input, key] of [
+      [sellerFightOutboundInput, "sellerFightOutbound"],
+      [sellerFightReturnInput, "sellerFightReturn"],
+    ]) {
+      if (!input) continue;
+      input.checked = bot.cave?.config?.[key] === true;
+      input.addEventListener("change", () => {
+        bot.cave?.updateConfig?.({ [key]: input.checked });
+        refreshSellerStatus();
+      });
+    }
+    if (sellerConfirmButton) sellerConfirmButton.addEventListener("click", () => {
+      bot.cave?.resumeFromSeller?.(); refreshSellerStatus();
+    });
+    if (sellerAbortButton) sellerAbortButton.addEventListener("click", () => {
+      bot.cave?.cancelSellerTrip?.(); refreshSellerStatus();
+    });
+    refreshSellerStatus();
+    const sellerUiRefreshId = window.setInterval(() => {
+      if (document.getElementById("minibia-bot-panel") !== panel) {
+        window.clearInterval(sellerUiRefreshId);
+        return;
+      }
+      refreshSellerStatus();
+      if ((bot.cave?.getPresetNames?.() || []).length !== (sellerRouteSelect?.options?.length ?? 1) - 1) refreshSellerRouteOptions();
+    }, 1000);
+
     if (caveVerificationPauseInput) {
       caveVerificationPauseInput.checked = bot.cave?.config?.pauseWaypointsOnVerification === true;
       caveVerificationPauseInput.addEventListener("change", () => {
@@ -1838,6 +1939,13 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
       autoAttackChaseController.disabled = bot.attack?.config?.meleeMode === false;
       autoAttackChaseController.addEventListener("change", () => {
         bot.attack.updateConfig({ chaseController: autoAttackChaseController.value });
+      });
+    }
+
+    if (autoAttackAvoidStairsInput) {
+      autoAttackAvoidStairsInput.checked = bot.attack?.config?.avoidFloorChangesOnChase !== false;
+      autoAttackAvoidStairsInput.addEventListener("change", () => {
+        bot.attack.updateConfig({ avoidFloorChangesOnChase: autoAttackAvoidStairsInput.checked });
       });
     }
 

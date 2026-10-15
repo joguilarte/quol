@@ -2867,7 +2867,8 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
       // Explicitly select who owns pursuit. Native Safe Chase is more reliable
       // in Minibia, while local pathfinding can validate transitions.
       chaseController: "hybrid",
-      // Prevent melee pathfinding from traversing stairs, ladders and holes.
+      // When enabled, override native chase in ALL movement modes so every
+      // automated melee step follows a locally validated, same-floor path.
       avoidFloorChangesOnChase: true,
       enabled: false,
     },
@@ -2953,8 +2954,9 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
     const cave = bot.cave;
     if (!cave?.status || !cave?.getRoute || cave.config?.limitChaseToRoute !== true) return null;
     if (!cave.status().running) return null;
+    const escortRoute = cave.getSellerEscortWaypoints?.();
     return {
-      points: cave.getRoute().map(normalizePosition).filter(Boolean),
+      points: (escortRoute || cave.getRoute()).map(normalizePosition).filter(Boolean),
       radius: Math.max(2, Math.min(20, Math.trunc(Number(cave.config.maxChaseFromRouteTiles) || 6))),
     };
   }
@@ -3170,7 +3172,11 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
     }
     // Set the server's chase mode BEFORE engaging. Otherwise it can receive
     // the target first in Stand mode and never begin following automatically.
-    if (config.meleeMode && config.chaseController === "native") {
+    // If a native chase was enabled, disarm it BEFORE selecting a new target;
+    // otherwise the server could begin following before our next tick.
+    if (config.meleeMode && config.avoidFloorChangesOnChase) {
+      if (!disableUnsafeNativeChase()) return false;
+    } else if (config.meleeMode && config.chaseController === "native") {
       ensureNativeChase();
     }
     window.gameClient.player.setTarget(target);
@@ -3376,26 +3382,80 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
   // Check the actual tile definition first; name matching is a conservative
   // fallback for custom tiles that lack the floorchange flag.
   function isFloorTransitionTile(tile) {
-    if (!tile) return true; // unknown geometry is not safe for automated chase
+    // Conservative: if terrain metadata is missing, never issue an automated
+    // chase step. The route recorder itself is unchanged (intentional stairs).
+    if (!tile || !tile.__position) return true;
     const defs = window.gameClient;
     const pieces = [tile, ...(Array.isArray(tile.items) ? tile.items : [])];
+    if (typeof tile.isNotPathable === "function" && tile.isNotPathable()) return true;
     return pieces.some((piece) => {
       const id = Number(piece?.id);
       const def = defs?.itemDefinitionsByCid?.[id] ||
         defs?.itemDefinitionsBySid?.[id] || defs?.itemDefinitions?.[id];
-      if (def?.properties?.floorchange === true) return true;
-      if (id === 1948 || id === 1968) return true; // classic ladder identifiers
+      if (def?.properties?.floorchange) return true;
+      if (id === 1948 || id === 1968) return true;
       const label = String(def?.properties?.name || piece?.name || '').toLowerCase();
       return /\b(stairs?|staircase|ladder|hole|rope spot|ramp|teleport)\b/.test(label);
     });
   }
 
-  function isSafeMeleePath(path) {
-    // The local search returns Tile nodes. Refuse unknown or incomplete paths,
-    // rather than risking an unintended floor transition.
+  function isSafeMeleePath(path, currentFloor) {
+    // Validates the EXACT path that we later encode into an AutoWalkPacket.
+    // Never fall back to server map-click; its path cannot be inspected here.
     return Array.isArray(path) && path.length > 0 && path.every((tile) =>
-      tile?.__position && !isFloorTransitionTile(tile)
+      tile?.__position && Number(tile.__position.z) === Number(currentFloor) &&
+      !isFloorTransitionTile(tile)
     );
+  }
+
+  function disableUnsafeNativeChase() {
+    const player = window.gameClient?.player;
+    const selector = window.gameClient?.interface?.fightModeSelector;
+    if (player?.__followTarget) clearCurrentFollowTarget();
+    const mode = Number(selector?.currentChaseMode) || 0;
+    if (mode !== 0) {
+      if (typeof selector?.setChaseMode !== 'function') return false;
+      selector.setChaseMode(0);
+      bot.log('stair guard: native Auto Chase disabled; validated bot route owns pursuit');
+    }
+    return true;
+  }
+
+  function sendValidatedMeleeWalk(playerPosition, targetPosition, path) {
+    const client = window.gameClient;
+    const pf = client?.world?.pathfinder;
+    const startTile = getTileFromPosition(playerPosition);
+    if (!pf || !startTile || typeof AutoWalkPacket !== 'function' ||
+        typeof Position !== 'function' ||
+        !isSafeMeleePath(path, playerPosition.z) ||
+        isFloorTransitionTile(getTileFromPosition(targetPosition))) return false;
+
+    // The earlier implementation called findPath(), which switches Safe Chase
+    // OFF, and with Server Mapclick enabled delegates route selection to the
+    // server. Here we transmit only a fully validated local A* path.
+    const directions = [];
+    let previous = startTile;
+    for (const tile of path) {
+      if (!tile?.__position || typeof previous.__position?.getLookDirection !== 'function') return false;
+      directions.push(previous.__position.getLookDirection(tile.__position));
+      previous = tile;
+    }
+    if (directions.length === 0) return false;
+
+    // Do not steal an active waypoint, manual walk or Rare-item movement.
+    const active = !!pf.__isAutoWalking;
+    const previousDestination = getPositionKey(normalizePosition(pf.__finalDestination));
+    if (active && previousDestination !== state.lastChaseDestinationKey) return false;
+
+    // Once owned, replacement pathing is safe: the new AutoWalkPacket supersedes
+    // our previous path on the server. Pathfinder state mirrors client.findPath.
+    pf.__finalDestination = new Position(targetPosition.x, targetPosition.y, targetPosition.z);
+    pf.__minimapWaypoints = null;
+    pf.__pathfindCache = [];
+    pf.__isAutoWalking = true;
+    pf.__autoWalkStepsRemaining = directions.length;
+    client.send(new AutoWalkPacket(directions));
+    return true;
   }
 
   function findReachableAdjacentPosition(targetPosition, playerPosition) {
@@ -3440,18 +3500,18 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
       if (leash && !isInsideRoute(candidatePosition, leash)) continue;
 
       if (candidatePosition.x === playerPosition.x && candidatePosition.y === playerPosition.y) {
-        return candidatePosition;
+        return { position: candidatePosition, path: [] };
       }
 
       try {
         const path = pathfinder.search(startTile, tile);
         const safeFloor = config.avoidFloorChangesOnChase
-          ? isSafeMeleePath(path)
+          ? isSafeMeleePath(path, playerPosition.z)
           : Array.isArray(path) && path.length > 0;
         const safeLeash = !leash || (Array.isArray(path) && path.every((node) =>
           isInsideRoute(normalizePosition(node?.__position), leash)
         ));
-        if (safeFloor && safeLeash) return candidatePosition;
+        if (safeFloor && safeLeash) return { position: candidatePosition, path };
       } catch (error) {
         bot.log("auto attack reachability check failed", {
           ...candidatePosition,
@@ -3488,33 +3548,30 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
       return false;
     }
 
-    // Never chase a remembered target that the client is no longer attacking.
     if (!isSameCreature(getCurrentTarget(), target)) return false;
 
-    if (config.chaseController === "native") {
-      // In native mode the bot owns *selection*, the server owns *movement*.
-      // Never send map-click autowalk here: it would switch Safe Chase OFF.
+    if (config.avoidFloorChangesOnChase) {
+      // Safety has precedence over Hybrid/Native/Bot. A native server chase
+      // cannot be guaranteed to avoid stairs from client-side code.
+      if (!disableUnsafeNativeChase()) return false;
+    } else if (config.chaseController === "native") {
       cancelPreviousMeleeChase();
       return ensureNativeChase();
-    }
-
-    // Hybrid arbitration: manually enabled native chase/follow ALWAYS wins.
-    // If native chase later drops to stand mode, local safe pathfinding acts
-    // as fallback. Crucially, hybrid NEVER toggles the game's chase button.
-    const manualFollow = getCurrentFollowTarget();
-    const selector = window.gameClient?.interface?.fightModeSelector;
-    const nativeChaseMode = Number(selector?.currentChaseMode) || 0;
-    if (config.chaseController === "hybrid") {
-      if (manualFollow || nativeChaseMode === 1 || nativeChaseMode === 2) {
-        cancelPreviousMeleeChase();
-        return true;
-      }
     } else {
-      // Explicit bot-only mode retains the V17 behavior.
-      if (manualFollow) return false;
-      if (nativeChaseMode === 1 || nativeChaseMode === 2) {
-        if (typeof selector?.setChaseMode !== "function") return false;
-        selector.setChaseMode(0);
+      const manualFollow = getCurrentFollowTarget();
+      const selector = window.gameClient?.interface?.fightModeSelector;
+      const nativeChaseMode = Number(selector?.currentChaseMode) || 0;
+      if (config.chaseController === "hybrid") {
+        if (manualFollow || nativeChaseMode === 1 || nativeChaseMode === 2) {
+          cancelPreviousMeleeChase();
+          return true;
+        }
+      } else {
+        if (manualFollow) return false;
+        if (nativeChaseMode === 1 || nativeChaseMode === 2) {
+          if (typeof selector?.setChaseMode !== "function") return false;
+          selector.setChaseMode(0);
+        }
       }
     }
 
@@ -3546,7 +3603,8 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
       return false;
     }
 
-    const adjacentPosition = findReachableAdjacentPosition(targetPosition, playerPosition);
+    const safeRoute = findReachableAdjacentPosition(targetPosition, playerPosition);
+    const adjacentPosition = safeRoute?.position;
     if (!adjacentPosition) {
       if (!state.lastFollowStallAt) state.lastFollowStallAt = now;
       // Only give up after a sustained lack of player movement AND no valid
@@ -3582,25 +3640,18 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
     if (sameDestination && elapsed < (ownPathActive ? 2000 : 900)) return false;
     if (!sameDestination && elapsed < 450) return false;
 
-    // Server-side mapclick can choose a different route from the local A*.
-    // Fail closed instead of sending an unvalidated chase across floors.
-    if (config.avoidFloorChangesOnChase &&
-        window.gameClient?.interface?.settings?.isServerMapclickEnabled?.()) {
-      bot.log("melee chase blocked: server mapclick cannot verify safe route");
-      cancelPreviousMeleeChase();
-      return false;
-    }
-
     try {
-      // Only cancel paths that this module previously requested. A stalled
-      // walk needs a clean retry, but waypoint/manual/item paths are not ours.
-      if (ownPathActive && idleForMs >= 2200) {
-        cancelPreviousMeleeChase();
+      // Do not cancel another module's movement. When we own the old path,
+      // replace it using a freshly validated route (without map-click).
+      if (config.avoidFloorChangesOnChase) {
+        if (!sendValidatedMeleeWalk(playerPosition, adjacentPosition, safeRoute.path)) return false;
+      } else {
+        if (ownPathActive && idleForMs >= 2200) cancelPreviousMeleeChase();
+        pathfinder.findPath(
+          new Position(playerPosition.x, playerPosition.y, playerPosition.z),
+          new Position(adjacentPosition.x, adjacentPosition.y, adjacentPosition.z)
+        );
       }
-      pathfinder.findPath(
-        new Position(playerPosition.x, playerPosition.y, playerPosition.z),
-        new Position(adjacentPosition.x, adjacentPosition.y, adjacentPosition.z)
-      );
       state.lastChaseAt = now;
       state.lastChaseDestinationKey = destinationKey;
       return true;
@@ -3911,6 +3962,8 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     lastRouteRecoveryWarningAt: 0,
     combatPauseStartedAt: 0,
     combatYieldUntil: 0,
+    sellerTrip: null, // transient: not persisted across reload
+    sellerTripCooldownUntil: 0,
   };
   const minimapOverlayState = {
     timerId: null,
@@ -3925,6 +3978,11 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
       prioritizeMonsters: false, // opt-in: pause waypoint navigation during fights
       limitChaseToRoute: false, // opt-in: do not chase mobs outside recorded route area
       maxChaseFromRouteTiles: 6,
+      autoSellerVisit: false,
+      sellerPresetName: "",
+      minimumFreeCapacity: 50,
+      sellerFightOutbound: false,
+      sellerFightReturn: false,
       pauseWaypointsOnVerification: false, // opt-in, never pauses auto-attack or auto-heal
       verificationScanTickMs: 500,
       enabled: false,
@@ -3937,6 +3995,11 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
   config.autoRecoverWaypoints = config.autoRecoverWaypoints !== false;
   config.limitChaseToRoute = config.limitChaseToRoute === true;
   config.maxChaseFromRouteTiles = Math.max(2, Math.min(20, Math.trunc(Number(config.maxChaseFromRouteTiles) || 6)));
+  config.autoSellerVisit = config.autoSellerVisit === true;
+  config.sellerPresetName = String(config.sellerPresetName || "").trim();
+  config.minimumFreeCapacity = Math.max(1, Math.min(10000, Number(config.minimumFreeCapacity) || 50));
+  config.sellerFightOutbound = config.sellerFightOutbound === true;
+  config.sellerFightReturn = config.sellerFightReturn === true;
   config.pauseWaypointsOnVerification = config.pauseWaypointsOnVerification === true;
   config.verificationScanTickMs = Math.max(200, Math.min(5000, Math.round(Number(config.verificationScanTickMs) || 500)));
 
@@ -4839,7 +4902,8 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     let best = null;
     let bestScore = Number.POSITIVE_INFINITY;
 
-    transitions.forEach((transition) => {
+    const sellerTransitions = state.sellerTrip?.sellerTransitions || [];
+    [...transitions, ...sellerTransitions].forEach((transition) => {
       if (transition.from.z !== position.z || transition.to.z !== waypoint.z) {
         return;
       }
@@ -5424,6 +5488,196 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     }, config.tickMs);
   }
 
+  // Automated navigation to a configured seller waypoint route. This deliberately
+  // DOES NOT issue a sell transaction: the game shop packet is not validated.
+  // Operator must confirm the sale before reverse navigation starts.
+  function getSellerTripStatus() {
+    const trip = state.sellerTrip;
+    return trip ? { phase: trip.phase, index: trip.index,
+      sellerPresetName: trip.sellerPresetName, attackWasRunning: trip.attackWasRunning,
+      combatEnabled: isSellerEscortCombatEnabled(trip),
+      sellerWaypoints: trip.sellerRoute.length } : null;
+  }
+
+  function isSellerEscortCombatEnabled(trip) {
+    if (!trip || !trip.attackWasRunning) return false;
+    if (trip.phase === "exit-hunt" || trip.phase === "seller-out") {
+      return config.sellerFightOutbound === true;
+    }
+    if (trip.phase === "seller-return") return config.sellerFightReturn === true;
+    return false; // Always peaceful while standing at the merchant.
+  }
+
+  // Only control Auto Attack when the desired travel phase changes. That keeps
+  // a manual user stop respected until the next phase transition.
+  function syncSellerEscortCombat(trip) {
+    if (!trip) return;
+    const shouldFight = isSellerEscortCombatEnabled(trip);
+    if (trip.lastCombatMode === shouldFight) return;
+    const isRunning = !!bot.attack?.status?.()?.running;
+    if (shouldFight && !isRunning) bot.attack?.start?.();
+    if (!shouldFight && isRunning) bot.attack?.stop?.({ persistEnabled: false });
+    trip.lastCombatMode = shouldFight;
+    trip.combatPaused = false;
+    trip.lastCombatSeenAt = 0;
+    state.lastPathAt = 0;
+    bot.log(`seller escort combat ${shouldFight ? "enabled" : "disabled"}`, { phase: trip.phase });
+  }
+
+  function getSellerEscortWaypoints() {
+    const trip = state.sellerTrip;
+    if (!isSellerEscortCombatEnabled(trip)) return null;
+    // Keeps the existing route leash, extended across the planned seller
+    // corridor. We never allow arbitrarily long pursuits across the map.
+    return [...route, ...trip.sellerRoute].map((point) => cloneValue(point));
+  }
+
+  function beginSellerTrip(force = false) {
+    if (!state.running || state.sellerTrip) return false;
+    if (!force && !config.autoSellerVisit) return false;
+    if (!force && Date.now() < state.sellerTripCooldownUntil) return false;
+    const preset = getPresetByName(config.sellerPresetName);
+    // The recorded seller route MUST begin at hunt route[0], otherwise a
+    // cross-floor or map-wide jump might be treated as a direct path.
+    const start = preset?.route?.[0];
+    if (!preset || preset.route.length < 2 || route.length < 2 ||
+        !start || !isSameTile(start, route[0]) ||
+        preset.name.toLowerCase() === getActivePresetName().toLowerCase()) {
+      if (force) bot.log("seller trip not configured: route must start at the first hunt waypoint");
+      return false;
+    }
+    const freeCapacity = Number(bot.getPlayerSnapshot?.()?.capacity);
+    if (!force && (!Number.isFinite(freeCapacity) ||
+        freeCapacity > config.minimumFreeCapacity)) return false;
+    const pos = normalizePosition(bot.getPlayerPosition());
+    if (!pos) return false;
+    const attackWasRunning = !!bot.attack?.status?.()?.running;
+    const floorMoveWasRunning = !!bot.floorMove?.status?.()?.running;
+    if (floorMoveWasRunning) bot.floorMove.stop({ persistEnabled: false });
+    state.sellerTrip = {
+      phase: "exit-hunt", index: findClosestWaypointIndex(pos),
+      sellerRoute: preset.route.map((waypoint) => cloneValue(waypoint)),
+      sellerTransitions: preset.transitions.map((entry) => cloneValue(entry)),
+      sellerPresetName: preset.name, attackWasRunning, floorMoveWasRunning,
+      lastCombatMode: null, combatPaused: false, lastCombatSeenAt: 0,
+    };
+    syncSellerEscortCombat(state.sellerTrip);
+    state.lastWaypointWalkDestinationKey = null;
+    state.lastPathAt = 0;
+    bot.log("seller trip started; combat according to escort settings; no auto-sell enabled", {
+      freeCapacity, threshold: config.minimumFreeCapacity, preset: preset.name,
+    });
+    return true;
+  }
+
+  function cancelSellerTrip() {
+    const trip = state.sellerTrip;
+    if (!trip) return false;
+    cancelOwnWaypointWalk();
+    state.sellerTrip = null;
+    state.sellerTripCooldownUntil = Date.now() + 60000;
+    state.needsRouteRejoinCheck = true;
+    state.lastPathAt = 0;
+    if (trip.attackWasRunning && !bot.attack?.status?.()?.running) bot.attack?.start?.();
+    if (trip.floorMoveWasRunning && !bot.floorMove?.status?.()?.running) bot.floorMove?.start?.();
+    bot.log("seller trip aborted; hunt resumed");
+    return true;
+  }
+
+  function resumeFromSeller() {
+    const trip = state.sellerTrip;
+    if (!trip || trip.phase !== "waiting-at-seller") return false;
+    trip.phase = "seller-return";
+    syncSellerEscortCombat(trip);
+    trip.index = trip.sellerRoute.length - 2;
+    state.lastPathAt = 0;
+    state.lastWaypointWalkDestinationKey = null;
+    bot.log("seller visit confirmed by operator; returning to hunting zone");
+    return true;
+  }
+
+  function finishSellerTrip() {
+    const trip = state.sellerTrip;
+    if (!trip) return;
+    state.sellerTrip = null;
+    state.sellerTripCooldownUntil = Date.now() + 60000;
+    state.currentIndex = 0;
+    state.direction = 1;
+    state.lastWaypointWalkDestinationKey = null;
+    state.lastPathAt = 0;
+    state.needsRouteRejoinCheck = false;
+    if (trip.attackWasRunning && !bot.attack?.status?.()?.running) bot.attack?.start?.();
+    if (trip.floorMoveWasRunning && !bot.floorMove?.status?.()?.running) bot.floorMove?.start?.();
+    bot.log("seller route return completed; normal hunting resumed");
+  }
+
+  function processSellerTrip(position, now) {
+    let trip = state.sellerTrip;
+    if (!trip) {
+      beginSellerTrip(false);
+      trip = state.sellerTrip;
+    }
+    if (!trip) return false;
+    syncSellerEscortCombat(trip);
+    if (trip.phase === "waiting-at-seller") return true;
+    if (isSellerEscortCombatEnabled(trip) && bot.attack?.status?.()?.running) {
+      const active = !!bot.attack.status().combatActive;
+      const monsters = !!bot.attack?.hasPriorityMonsters?.(now);
+      if (active || monsters) {
+        trip.lastCombatSeenAt = now;
+        if (!trip.combatPaused) {
+          trip.combatPaused = true;
+          cancelOwnWaypointWalk(); // Does not cancel Auto Attack-owned chase.
+          bot.log("seller escort paused for combat", { phase: trip.phase });
+        }
+        return true;
+      }
+      // Brief grace between respawns without walking one square after each kill.
+      if (trip.combatPaused && now - trip.lastCombatSeenAt < 900) return true;
+      if (trip.combatPaused) {
+        trip.combatPaused = false;
+        state.lastPathAt = 0;
+        bot.log("seller escort resumed waypoint navigation");
+      }
+    }
+    let destination = trip.phase === "exit-hunt" ? route[trip.index] :
+      trip.sellerRoute[trip.index];
+    if (!destination) {
+      bot.log("seller trip invalid waypoint; aborting to prevent unsafe navigation");
+      cancelSellerTrip();
+      return true;
+    }
+    if (isAtWaypoint(position, destination)) {
+      if (trip.phase === "exit-hunt") {
+        if (trip.index === 0) { trip.phase = "seller-out"; trip.index = 0; }
+        else trip.index -= 1;
+      } else if (trip.phase === "seller-out") {
+        if (trip.index === trip.sellerRoute.length - 1) {
+          trip.phase = "waiting-at-seller";
+          syncSellerEscortCombat(trip);
+          bot.log("arrived at seller: SELL MANUALLY, then press Confirm Sale & Return");
+          return true;
+        }
+        trip.index += 1;
+      } else if (trip.phase === "seller-return") {
+        if (trip.index === 0) { finishSellerTrip(); return true; }
+        trip.index -= 1;
+      }
+      state.lastPathAt = 0;
+      state.lastWaypointWalkDestinationKey = null;
+      destination = trip.phase === "exit-hunt" ? route[trip.index] :
+        trip.sellerRoute[trip.index];
+    }
+    // Reuse the same learned stair/hole handling as intentional Cave Bot routes.
+    if (destination?.z !== position.z) {
+      handleFloorChange(destination, now);
+    } else if (now - state.lastPathAt >= config.repathMs ||
+      now - state.lastProgressAt >= config.repathMs) {
+      goToWaypoint(destination);
+    }
+    return true;
+  }
+
   function tick() {
     if (!state.running) return;
 
@@ -5461,6 +5715,8 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
         state.needsRouteRejoinCheck = true;
         bot.log("cave recovered stale floor-item navigation pause");
       }
+      // Supply-return route has priority over the hunting route and combat.
+      if (processSellerTrip(position, now)) return;
       const attackStatus = bot.attack?.status?.() || null;
       const priorityEnabled = config.prioritizeMonsters === true &&
         !!attackStatus?.running && !!attackStatus?.config?.enabled;
@@ -5644,6 +5900,11 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
       persistConfig();
     }
     state.pausedForCombat = false;
+    const abandonedSellerTrip = state.sellerTrip;
+    state.sellerTrip = null;
+    if (abandonedSellerTrip?.attackWasRunning && !bot.attack?.status?.()?.running) {
+      bot.attack?.start?.();
+    }
     state.pausedForFloorMove = false;
     state.needsRouteRejoinCheck = false;
     state.combatPauseStartedAt = 0;
@@ -5764,6 +6025,8 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
       pausedForVerification: state.pausedForVerification && config.pauseWaypointsOnVerification,
       lastVerificationNotice: state.lastVerificationNotice,
       lastVerificationSeenAt: state.lastVerificationSeenAt,
+      sellerTrip: getSellerTripStatus(),
+      freeCapacity: Number(bot.getPlayerSnapshot?.()?.capacity) || null,
     };
   }
 
@@ -5773,6 +6036,11 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     config.autoRecoverWaypoints = config.autoRecoverWaypoints !== false;
     config.limitChaseToRoute = config.limitChaseToRoute === true;
     config.maxChaseFromRouteTiles = Math.max(2, Math.min(20, Math.trunc(Number(config.maxChaseFromRouteTiles) || 6)));
+    config.autoSellerVisit = config.autoSellerVisit === true;
+    config.sellerPresetName = String(config.sellerPresetName || "").trim();
+    config.minimumFreeCapacity = Math.max(1, Math.min(10000, Number(config.minimumFreeCapacity) || 50));
+    config.sellerFightOutbound = config.sellerFightOutbound === true;
+    config.sellerFightReturn = config.sellerFightReturn === true;
     config.pauseWaypointsOnVerification = config.pauseWaypointsOnVerification === true;
     config.verificationScanTickMs = Math.max(200, Math.min(5000, Math.round(Number(config.verificationScanTickMs) || 500)));
     config.tickMs = 500;
@@ -5803,6 +6071,11 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     status,
     updateConfig,
     resumeAfterVerification,
+    beginSellerTrip,
+    getSellerTripStatus,
+    getSellerEscortWaypoints,
+    resumeFromSeller,
+    cancelSellerTrip,
     setFloorMovePause,
     scanVerificationNotice,
     config,
@@ -7714,7 +7987,11 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     const status = bot.cave?.status?.();
 
     if (statusLabel) {
-      if (!route.length) {
+      if (status?.sellerTrip?.phase === "waiting-at-seller") {
+        statusLabel.textContent = "At seller — sell manually; press Confirm Sale & Return";
+      } else if (status?.sellerTrip) {
+        statusLabel.textContent = `Seller trip: ${status.sellerTrip.phase} (${status.sellerTrip.index + 1})`;
+      } else if (!route.length) {
         statusLabel.textContent = "Status: no waypoints";
       } else if (status?.pausedForVerification) {
         statusLabel.textContent = "Status: paused for verification (Heal/Attack stay active)";
@@ -8753,6 +9030,21 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
                 <input type="number" id="minibia-bot-cave-max-chase" min="2" max="20" step="1" value="6" />
               </label>
               <div class="mb-small-note">Only with Cave Bot running and Melee Mode on. Stop chasing beyond the radius and resume waypoints. Add intermediate waypoints along long corridors.</div>
+              <div class="mb-label">Seller Return (capacity)</div>
+              <label class="mb-toggle"><input type="checkbox" id="minibia-bot-seller-enabled"/><span>Return to seller on low capacity</span></label>
+              <label class="mb-field" for="minibia-bot-seller-cap"><span class="mb-field-label">Free capacity threshold (oz)</span>
+                <input id="minibia-bot-seller-cap" type="number" min="1" max="10000" value="50" /></label>
+              <label class="mb-field" for="minibia-bot-seller-route"><span class="mb-field-label">Seller route (saved preset)</span>
+                <select id="minibia-bot-seller-route"><option value="">Select a route</option></select></label>
+              <label class="mb-toggle"><input type="checkbox" id="minibia-bot-seller-fight-outbound"/><span>Fight while going to seller</span></label>
+              <label class="mb-toggle"><input type="checkbox" id="minibia-bot-seller-fight-return"/><span>Fight while returning to hunt</span></label>
+              <div class="mb-small-note">Escort combat is available only if Auto Attack was running when the trip started. Waypoints pause while fighting. Both options start OFF. Auto Heal remains independent.</div>
+              <div class="mb-small-note">Record a separate route from the FIRST hunting waypoint to the seller, including every corridor and floor transition. Hunting pauses at the NPC. Selling is MANUAL until shop protocol is validated.</div>
+              <div class="mb-actions mb-actions-inline-two">
+                <button type="button" class="mb-small-button" id="minibia-bot-seller-confirm">Confirm Sale &amp; Return</button>
+                <button type="button" class="mb-small-button" id="minibia-bot-seller-abort">Abort Trip</button>
+              </div>
+              <div class="mb-small-note" id="minibia-bot-seller-status">Seller return: off</div>
               <label class="mb-toggle">
                 <input type="checkbox" id="minibia-bot-cave-verification-pause" />
                 <span>Pause waypoints on anti-bot notice</span>
@@ -8792,7 +9084,11 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
                   <option value="pathfinder">Bot pathfinding (avoid stairs)</option>
                 </select>
               </label>
-              <div class="mb-small-note">Hybrid: manually enabled Minibia Auto Chase takes priority; if it switches OFF, bot pathfinding follows safely as backup. Neither controller runs when Melee Mode is OFF. Native mode activates Safe Chase automatically; bot-only mode always uses pathfinding.</div>
+              <label class="mb-toggle">
+                <input type="checkbox" id="minibia-bot-auto-attack-avoid-stairs" />
+                <span>Strict stair protection (all pursuit modes)</span>
+              </label>
+              <div class="mb-small-note">When ON, safety overrides Hybrid/Native and uses only locally validated bot paths. The game's native chase/follow is turned OFF during automatic melee attacks. Intentional Cave Bot stair waypoints are unaffected. When OFF, the selected pursuit method works normally without guaranteed stair avoidance.</div>
               <label class="mb-field" for="minibia-bot-auto-attack-hotkey">
                 <span class="mb-field-label">Target Hotkey (1-12)</span>
                 <input type="number" id="minibia-bot-auto-attack-hotkey" min="1" max="12" placeholder="3" />
@@ -8844,6 +9140,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     const autoAttackEnabledInput = panel.querySelector("#minibia-bot-auto-attack-enabled");
     const autoAttackMeleeInput = panel.querySelector("#minibia-bot-auto-attack-melee");
     const autoAttackChaseController = panel.querySelector("#minibia-bot-auto-attack-chase-controller");
+    const autoAttackAvoidStairsInput = panel.querySelector("#minibia-bot-auto-attack-avoid-stairs");
     const autoAttackHotkeyInput = panel.querySelector("#minibia-bot-auto-attack-hotkey");
     const autoAttackRuneHotkeyInput = panel.querySelector("#minibia-bot-auto-attack-rune-hotkey");
     const floorMoveToggle = panel.querySelector("#minibia-bot-floor-move-enabled");
@@ -8873,6 +9170,14 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     const collapseButton = panel.querySelector("#minibia-bot-collapse");
     const reloadButton = panel.querySelector("#minibia-bot-reload");
     const cavePrioritizeMonstersInput = panel.querySelector("#minibia-bot-cave-prioritize-monsters");
+    const sellerEnabledInput = panel.querySelector("#minibia-bot-seller-enabled");
+    const sellerCapInput = panel.querySelector("#minibia-bot-seller-cap");
+    const sellerRouteSelect = panel.querySelector("#minibia-bot-seller-route");
+    const sellerFightOutboundInput = panel.querySelector("#minibia-bot-seller-fight-outbound");
+    const sellerFightReturnInput = panel.querySelector("#minibia-bot-seller-fight-return");
+    const sellerConfirmButton = panel.querySelector("#minibia-bot-seller-confirm");
+    const sellerAbortButton = panel.querySelector("#minibia-bot-seller-abort");
+    const sellerStatusLabel = panel.querySelector("#minibia-bot-seller-status");
     const caveLimitChaseInput = panel.querySelector("#minibia-bot-cave-limit-chase");
     const caveMaxChaseInput = panel.querySelector("#minibia-bot-cave-max-chase");
     const caveVerificationPauseInput = panel.querySelector("#minibia-bot-cave-verification-pause");
@@ -9093,6 +9398,75 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
       });
     }
 
+    function refreshSellerRouteOptions() {
+      if (!sellerRouteSelect) return;
+      const value = String(bot.cave?.config?.sellerPresetName || "");
+      const names = bot.cave?.getPresetNames?.() || [];
+      sellerRouteSelect.replaceChildren();
+      const empty = document.createElement("option");
+      empty.value = ""; empty.textContent = "Select a route";
+      sellerRouteSelect.append(empty);
+      for (const name of names) {
+        const item = document.createElement("option");
+        item.value = name; item.textContent = name;
+        sellerRouteSelect.append(item);
+      }
+      sellerRouteSelect.value = names.includes(value) ? value : "";
+    }
+    function refreshSellerStatus() {
+      const trip = bot.cave?.getSellerTripStatus?.();
+      if (sellerStatusLabel) sellerStatusLabel.textContent = trip
+        ? `Seller return: ${trip.phase}`
+        : `Seller return: ${bot.cave?.config?.autoSellerVisit ? "armed" : "off"}`;
+      if (sellerConfirmButton) sellerConfirmButton.disabled = trip?.phase !== "waiting-at-seller";
+      if (sellerAbortButton) sellerAbortButton.disabled = !trip;
+    }
+    if (sellerEnabledInput) {
+      sellerEnabledInput.checked = bot.cave?.config?.autoSellerVisit === true;
+      sellerEnabledInput.addEventListener("change", () => {
+        bot.cave?.updateConfig?.({autoSellerVisit: sellerEnabledInput.checked});
+        refreshSellerStatus();
+      });
+    }
+    if (sellerCapInput) {
+      sellerCapInput.value = String(bot.cave?.config?.minimumFreeCapacity ?? 50);
+      sellerCapInput.addEventListener("change", () => {
+        bot.cave?.updateConfig?.({minimumFreeCapacity: Number(sellerCapInput.value)});
+      });
+    }
+    if (sellerRouteSelect) {
+      refreshSellerRouteOptions();
+      sellerRouteSelect.addEventListener("change", () => {
+        bot.cave?.updateConfig?.({sellerPresetName: sellerRouteSelect.value});
+      });
+    }
+    for (const [input, key] of [
+      [sellerFightOutboundInput, "sellerFightOutbound"],
+      [sellerFightReturnInput, "sellerFightReturn"],
+    ]) {
+      if (!input) continue;
+      input.checked = bot.cave?.config?.[key] === true;
+      input.addEventListener("change", () => {
+        bot.cave?.updateConfig?.({ [key]: input.checked });
+        refreshSellerStatus();
+      });
+    }
+    if (sellerConfirmButton) sellerConfirmButton.addEventListener("click", () => {
+      bot.cave?.resumeFromSeller?.(); refreshSellerStatus();
+    });
+    if (sellerAbortButton) sellerAbortButton.addEventListener("click", () => {
+      bot.cave?.cancelSellerTrip?.(); refreshSellerStatus();
+    });
+    refreshSellerStatus();
+    const sellerUiRefreshId = window.setInterval(() => {
+      if (document.getElementById("minibia-bot-panel") !== panel) {
+        window.clearInterval(sellerUiRefreshId);
+        return;
+      }
+      refreshSellerStatus();
+      if ((bot.cave?.getPresetNames?.() || []).length !== (sellerRouteSelect?.options?.length ?? 1) - 1) refreshSellerRouteOptions();
+    }, 1000);
+
     if (caveVerificationPauseInput) {
       caveVerificationPauseInput.checked = bot.cave?.config?.pauseWaypointsOnVerification === true;
       caveVerificationPauseInput.addEventListener("change", () => {
@@ -9307,6 +9681,13 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
       autoAttackChaseController.disabled = bot.attack?.config?.meleeMode === false;
       autoAttackChaseController.addEventListener("change", () => {
         bot.attack.updateConfig({ chaseController: autoAttackChaseController.value });
+      });
+    }
+
+    if (autoAttackAvoidStairsInput) {
+      autoAttackAvoidStairsInput.checked = bot.attack?.config?.avoidFloorChangesOnChase !== false;
+      autoAttackAvoidStairsInput.addEventListener("change", () => {
+        bot.attack.updateConfig({ avoidFloorChangesOnChase: autoAttackAvoidStairsInput.checked });
       });
     }
 
