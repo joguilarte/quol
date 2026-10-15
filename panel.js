@@ -1242,6 +1242,10 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
                 <input type="checkbox" id="minibia-bot-talk-npc-replies" />
                 <span>Reply to nearby NPCs (any name)</span>
               </label>
+              <label class="mb-toggle">
+                <input type="checkbox" id="minibia-bot-talk-private-replies" />
+                <span>Reply to private messages (PM)</span>
+              </label>
               <label class="mb-field" for="minibia-bot-talk-mode">
                 <span class="mb-field-label">Response mode</span>
                 <select id="minibia-bot-talk-mode">
@@ -1274,7 +1278,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
               <div id="minibia-bot-talk-test-result" class="mb-gemini-preview" role="status" aria-live="polite" hidden></div>
               <div class="mb-small-note">Uses real Gemini API only in AI mode. Never sends the preview to game chat.</div>
               <div class="mb-small-note" id="minibia-bot-talk-status">Status: idle</div>
-              <div class="mb-small-note">Responds only to nearby visible senders in Default. Keywords respond only when a rule matches. Minimum 15 seconds between messages.</div>
+              <div class="mb-small-note">Default replies require nearby visible players. Private replies work from any distance when enabled and stay private. Keywords reply only on matching rules. Minimum 15 seconds between messages.</div>
             </div>
           </div>
           <div class="mb-section mb-column-section">
@@ -1801,6 +1805,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     const talkMinDelayInput = panel.querySelector("#minibia-bot-talk-min-delay");
     const talkMaxDelayInput = panel.querySelector("#minibia-bot-talk-max-delay");
     const talkNpcInput = panel.querySelector("#minibia-bot-talk-npc-replies");
+    const talkPrivateInput = panel.querySelector("#minibia-bot-talk-private-replies");
     const talkApiKeyInput = panel.querySelector("#minibia-bot-talk-api-key");
     const talkPromptInput = panel.querySelector("#minibia-bot-talk-prompt");
     const panicGmNameInput = panel.querySelector("#minibia-bot-panic-gm-input");
@@ -2533,6 +2538,14 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
       talkNpcInput.checked = bot.talk?.status?.().config?.replyToNpcs === true;
       talkNpcInput.addEventListener("change", () => {
         bot.talk.updateConfig({ replyToNpcs: talkNpcInput.checked });
+        refreshTalkStatus();
+      });
+    }
+
+    if (talkPrivateInput) {
+      talkPrivateInput.checked = bot.talk?.status?.().config?.replyToPrivate === true;
+      talkPrivateInput.addEventListener("change", () => {
+        bot.talk.updateConfig({ replyToPrivate: talkPrivateInput.checked });
         refreshTalkStatus();
       });
     }
