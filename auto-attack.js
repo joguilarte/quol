@@ -14,6 +14,7 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
     nearerTargetSince: 0,
     combatStartedAt: 0,
     lastChaseAt: 0,
+    lastRouteCheckAt: 0,
     lastChaseDestinationKey: null,
     lastFollowTargetId: null,
     lastFollowDistance: Number.POSITIVE_INFINITY,
@@ -224,6 +225,7 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
     state.nearerTargetSince = 0;
     state.combatStartedAt = 0;
     state.lastChaseDestinationKey = null;
+    state.lastRouteCheckAt = 0;
     resetFollowProgress();
   }
 
@@ -561,67 +563,48 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
     return true;
   }
 
-  function sendValidatedMeleeWalk(playerPosition, targetPosition) {
-    return bot.safeNavigation?.go?.('attack', targetPosition, {exactOnly:true, maxSteps:15})?.ok === true;
+  function sendValidatedMeleeWalk(targetPosition) {
+    return bot.safeNavigation?.go?.('attack', targetPosition,
+      { exactOnly: false, maxSteps: 18, maxNodes: 1600 }) || { ok: false };
   }
 
   function findReachableAdjacentPosition(targetPosition, playerPosition) {
-    if (!targetPosition || !playerPosition) {
-      return null;
-    }
-
+    if (!targetPosition || !playerPosition || !bot.safeNavigation?.plan) return null;
     const offsets = [
       { x: 0, y: -1 }, { x: 1, y: 0 }, { x: 0, y: 1 }, { x: -1, y: 0 },
       { x: -1, y: -1 }, { x: 1, y: -1 }, { x: -1, y: 1 }, { x: 1, y: 1 },
     ];
-
-    offsets.sort((a, b) => {
-      const da = Math.abs(targetPosition.x + a.x - playerPosition.x) +
-        Math.abs(targetPosition.y + a.y - playerPosition.y);
-      const db = Math.abs(targetPosition.x + b.x - playerPosition.x) +
-        Math.abs(targetPosition.y + b.y - playerPosition.y);
-      return da - db;
-    });
-
-    const pathfinder = window.gameClient?.world?.pathfinder;
-    const startTile = getTileFromPosition(playerPosition);
-    if (!pathfinder || !startTile || !bot.safeNavigation?.plan) {
-      return null;
-    }
-
+    const leash = getRouteLeash();
+    const last = state.lastChaseDestinationKey?.split(',').map(Number);
+    const previous = last?.length === 3 ? { x: last[0], y: last[1], z: last[2] } : null;
+    const options = [];
     for (const offset of offsets) {
-      const candidatePosition = {
-        x: targetPosition.x + offset.x,
-        y: targetPosition.y + offset.y,
-        z: targetPosition.z,
-      };
-      const tile = getTileFromPosition(candidatePosition);
-      if (!tile?.isWalkable?.()) {
-        continue;
-      }
-      if (config.avoidFloorChangesOnChase && isFloorTransitionTile(tile)) {
-        continue;
-      }
-      // Do not start a new melee walk whose destination escapes the route.
-      const leash = getRouteLeash();
-      if (leash && !isInsideRoute(candidatePosition, leash)) continue;
-
-      if (candidatePosition.x === playerPosition.x && candidatePosition.y === playerPosition.y) {
-        return { position: candidatePosition, path: [] };
-      }
-
+      const position = { x: targetPosition.x + offset.x,
+        y: targetPosition.y + offset.y, z: targetPosition.z };
+      if (leash && !isInsideRoute(position, leash)) continue;
+      const tile = getTileFromPosition(position);
+      if (!tile?.isWalkable?.() || tile?.isOccupied?.() !== false ||
+          isFloorTransitionTile(tile)) continue;
       try {
-        const route = bot.safeNavigation?.plan?.(playerPosition,candidatePosition,
-          {exactOnly:true,maxSteps:15});
-        const safeLeash = !leash || (route?.path?.every((node) =>
-          isInsideRoute(normalizePosition(node?.__position), leash)) === true);
-        if (route?.ok && safeLeash) return { position:candidatePosition, path:route.path };
+        const route = bot.safeNavigation.plan(playerPosition, position,
+          { exactOnly: false, maxSteps: 18, maxNodes: 1600 });
+        if (!route?.ok || !route.path?.length) continue;
+        if (leash && !route.path.every(node =>
+          isInsideRoute(normalizePosition(node?.__position), leash))) continue;
+        const previousGoal = previous && getPositionKey(position) === getPositionKey(previous);
+        const result = { position, path: route.path, exact: route.exact,
+          // Prefer reachable goals, cheaper cardinal routes, and stability.
+          // A partial route is valid as the first segment of a longer chase.
+          score: (route.exact ? 0 : 160) + (route.cost || 0) -
+            (previousGoal ? 12 : 0) + (offset.x && offset.y ? 2 : 0),
+          previousGoal };
+        options.push(result);
       } catch (error) {
-        bot.log('auto attack safe route check failed',error?.message||error);
+        bot.log('auto attack safe route check failed', error?.message || error);
       }
     }
-
-    return null;
+    options.sort((a,b) => a.score - b.score);
+    return options[0] || null;
   }
 
   // Native Chase controls movement through ChaseModePacket (blue button),
@@ -703,6 +686,13 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
       return false;
     }
 
+    // A healthy in-flight packet already owns movement. Do not run eight A*
+    // searches or change its destination on each 500 ms attack tick.
+    if (bot.safeNavigation?.owns?.('attack') && idleForMs < 2400) return false;
+    // Throttle failed/obstructed path checks; do not busy-loop inside caves.
+    if (now - state.lastRouteCheckAt < 750) return false;
+    state.lastRouteCheckAt = now;
+
     const safeRoute = findReachableAdjacentPosition(targetPosition, playerPosition);
     const adjacentPosition = safeRoute?.position;
     if (!adjacentPosition) {
@@ -710,7 +700,7 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
       // Only give up after a sustained lack of player movement AND no valid
       // path. A brief occupied tile is common while fighting in a cave.
       if (idleForMs >= giveUpDelayMs && now - state.lastFollowStallAt >= giveUpDelayMs)
-        return skipTarget(target, "no reachable adjacent tile", now, 1500);
+        return skipTarget(target, "no reachable adjacent tile", now, 5000);
       return false;
     }
 
@@ -718,7 +708,7 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
     state.lastFollowDistance = distance;
     state.lastFollowProgressAt = state.lastChasePlayerMovedAt;
     if (idleForMs >= giveUpDelayMs) {
-      return skipTarget(target, "chase could not progress", now, 1500);
+      return skipTarget(target, "chase could not progress", now, 5000);
     }
 
     const destinationKey = getPositionKey(adjacentPosition);
@@ -727,35 +717,31 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
         ((!config.avoidFloorChangesOnChase && config.chaseController !== "pathfinder") &&
           typeof pathfinder.findPath !== "function")) return false;
 
-    // If Minibia completed/cancelled the autowalk, __finalDestination becomes
-    // null. A stale lastChaseDestinationKey must not suppress reacquisition.
-    const activeDestinationKey = getPositionKey(normalizePosition(pathfinder.__finalDestination));
-    const ownPathActive = bot.safeNavigation?.owns?.("attack") &&
-      activeDestinationKey === state.lastChaseDestinationKey &&
-      activeDestinationKey === destinationKey && pathfinder.__isAutoWalking !== false;
+    const ownPathActive = bot.safeNavigation?.owns?.('attack') === true;
     const sameDestination = destinationKey === state.lastChaseDestinationKey;
     const elapsed = now - state.lastChaseAt;
 
-    // Let a healthy walk continue; only repath after an actual stall, a
-    // cancelled/completed autowalk or a changed monster position.
-    if (sameDestination && ownPathActive && idleForMs < 2200) return false;
-    if (sameDestination && elapsed < (ownPathActive ? 2000 : 900)) return false;
+    // Let an existing safe segment finish while the player is moving. The
+    // previous code checked __finalDestination (which can be null after a
+    // server cancel) and continuously replaced even healthy paths.
+    if (ownPathActive && idleForMs < 2400) return false;
+    if (sameDestination && elapsed < (ownPathActive ? 1200 : 500)) return false;
     if (!sameDestination && elapsed < 450) return false;
 
     try {
-      // Do not cancel another module's movement. When we own the old path,
-      // replace it using a freshly validated route (without map-click).
       if (config.avoidFloorChangesOnChase || config.chaseController === "pathfinder") {
-        if (!sendValidatedMeleeWalk(playerPosition, adjacentPosition)) return false;
+        const result = sendValidatedMeleeWalk(adjacentPosition);
+        if (!result.ok || result.deferred || result.alreadyThere) return false;
+        state.lastChaseDestinationKey = getPositionKey(result.destination);
       } else {
-        if (ownPathActive && idleForMs >= 2200) cancelPreviousMeleeChase();
+        if (ownPathActive && idleForMs >= 2400) cancelPreviousMeleeChase();
         pathfinder.findPath(
           new Position(playerPosition.x, playerPosition.y, playerPosition.z),
           new Position(adjacentPosition.x, adjacentPosition.y, adjacentPosition.z)
         );
+        state.lastChaseDestinationKey = destinationKey;
       }
       state.lastChaseAt = now;
-      state.lastChaseDestinationKey = destinationKey;
       return true;
     } catch (error) {
       bot.log("melee pathfind failed", error?.message || error);

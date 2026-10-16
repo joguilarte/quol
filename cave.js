@@ -1871,8 +1871,7 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
       // Do not override actual nearby engaged combat. If no valid target or
       // melee chase cannot move for a long period, allow Cave to leave the
       // unreachable spot briefly rather than pausing forever.
-      const yielded = now < state.combatYieldUntil &&
-        (noTarget || (attackStatus?.config?.meleeMode === true && targetDistance > 2));
+      const yielded = now < state.combatYieldUntil && noTarget && !monstersInRange;
       // Waypoint findPath() is deliberately interpreted by the Minibia client
       // as a manual map click and disables Safe Chase while a target exists.
       // If the player has explicitly activated native chase/follow, Cave Bot
@@ -1890,7 +1889,9 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
         if (!state.pausedForCombat) {
           state.pausedForCombat = true;
           state.combatPauseStartedAt = now;
-          if (priorityEnabled) cancelOwnWaypointWalk();
+          // Always hand the movement queue to combat, even if priority is OFF:
+          // a previously queued cave route must not block an active chase.
+          cancelOwnWaypointWalk();
           bot.log("cave paused for auto attack", {
             combatDurationMs: Number(attackStatus?.combatDurationMs || 0),
             targetCount: Number(attackStatus?.targetCount || 0),
@@ -1898,6 +1899,8 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
             monstersInRange: !!monstersInRange,
           });
         }
+        // If the previous Cave Bot step was still queued, relinquish it.
+        if (bot.safeNavigation?.owns?.('cave')) cancelOwnWaypointWalk();
         return;
       }
 
