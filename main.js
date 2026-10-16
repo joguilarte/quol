@@ -64,6 +64,7 @@
     currentBundle.installHealModule(bot);
     currentBundle.installAutoInvisibleModule(bot);
     currentBundle.installAutoMagicShieldModule(bot);
+    currentBundle.installSafeNavigationModule(bot);
     currentBundle.installAutoAttackModule(bot);
     currentBundle.installCaveModule(bot);
     currentBundle.installEquipRingModule(bot);
@@ -74,30 +75,77 @@
     currentBundle.installAutoSellModule(bot);
     currentBundle.installPanel(bot);
 
-    // Emergency stop: never restarts itself or clears recorded waypoints.
-    // Cave must stop first: stopping an active seller trip may restart attack.
+    // Reversible emergency latch. Snapshot exists only in this running tab:
+    // reloading must NEVER silently re-enable stopped automation.
+    let emergencySnapshot = null;
+    const resumableModules = ["heal", "rune", "eat", "invisible", "magicShield",
+      "equipRing", "talk", "floorMove", "corpseLoot", "attack", "cave", "panic"];
+    bot.emergencyState = () => ({halted:!!bot.storage.get('minibiaBot.emergencyStop',false),
+      canResume:emergencySnapshot!==null,
+      previous: emergencySnapshot ? {...emergencySnapshot.modules} : null});
     bot.emergencyStop = function emergencyStop() {
+      if (emergencySnapshot !== null) return false;
+      const modules = {};
+      for (const key of resumableModules) {
+        try {modules[key]=bot[key]?.status?.()?.running === true;} catch (_) {modules[key]=false;}
+      }
+      emergencySnapshot = {
+        modules,
+        autoSellEnabled: bot.autoSell?.status?.()?.config?.enabled === true,
+        overlayEnabled: bot.xray?.status?.()?.config?.overlayEnabled === true,
+      };
+      bot.storage.set('minibiaBot.emergencyStop',true);
       try {
-        bot.storage.set("minibiaBot.emergencyStop", true);
-        bot.autoSell?.updateConfig?.({enabled:false});
-        bot.autoSell?.reset?.();
-        bot.corpseLoot?.stop?.("Emergency stop");
+        bot.autoSell?.updateConfig?.({enabled:false});bot.autoSell?.reset?.();
+        bot.corpseLoot?.stop?.('Emergency stop');
         bot.cave?.stop?.();
         bot.attack?.stop?.();
-        for (const key of ["rune", "heal", "eat", "invisible", "magicShield", "equipRing", "talk", "floorMove"]) {
-          try { bot[key]?.stop?.(); } catch(error) { bot.log("emergency stop " + key, error?.message || error); }
+        for (const key of ['rune','heal','eat','invisible','magicShield','equipRing','talk','floorMove','panic']) {
+          try {bot[key]?.stop?.();} catch(error) {bot.log('emergency stop '+key,error?.message||error);}
         }
-        bot.panic?.stop?.();
+        bot.safeNavigation?.cancel?.('attack');bot.safeNavigation?.cancel?.('cave');
         bot.xray?.setOverlayEnabled?.(false);
-        const client = window.gameClient;
-        // Emergency only: clear even native chase, unlike the normal STOP HUNT.
-        try { client?.interface?.fightModeSelector?.setChaseMode?.(0); } catch(e) { /* no native chase on this client */ }
-        try { client?.world?.pathfinder?.setPathfindCache?.(null); } catch(e) { /* no walk cache */ }
-        try { if (typeof StopWalkPacket === "function") client?.send?.(new StopWalkPacket()); } catch(e) { /* no stop packet */ }
-        bot.log("EMERGENCY STOP engaged: all bot automation halted");
-      } catch (error) {
-        console.error("[minibia-bot] emergency stop failure", error);
+        const client=window.gameClient;
+        try {client?.interface?.fightModeSelector?.setChaseMode?.(0);} catch (_) {}
+        try {client?.world?.pathfinder?.setPathfindCache?.(null);} catch (_) {}
+        try {if(typeof StopWalkPacket==='function')client?.send?.(new StopWalkPacket());} catch (_) {}
+        bot.log('EMERGENCY STOP: configuration saved for manual resume');
+      } catch(error) {console.error('[minibia-bot] emergency stop failure',error);}
+      return true;
+    };
+    bot.emergencyDismiss = function emergencyDismiss() {
+      emergencySnapshot=null;
+      bot.storage.set("minibiaBot.emergencyStop",false);
+      return true;
+    };
+    bot.emergencyResume = function emergencyResume() {
+      if (!emergencySnapshot) {
+        bot.log('cannot resume: no snapshot in this session; use Quick Hunt');
+        return false;
       }
+      const saved=emergencySnapshot;
+      // Cave last: restart defense/combat before restoring waypoint movement.
+      const order=['heal','rune','eat','invisible','magicShield','equipRing',
+        'talk','floorMove','corpseLoot','attack','panic','cave'];
+      const failed=[];
+      for(const key of order) {
+        if(!saved.modules[key]) continue;
+        try {
+          if(bot[key]?.status?.()?.running===true) continue;
+          if (key==='corpseLoot') bot.corpseLoot?.updateConfig?.({enabled:true});
+          else if (bot[key]?.start?.()===false) {failed.push(key);continue;}
+          if(bot[key]?.status?.()?.running!==true) failed.push(key);
+        }catch(error){failed.push(key);bot.log('emergency resume '+key,error?.message||error);}
+      }
+      if(saved.autoSellEnabled) try {bot.autoSell?.updateConfig?.({enabled:true});} catch (_) {failed.push('autoSell');}
+      if(saved.overlayEnabled) try {bot.xray?.setOverlayEnabled?.(true);} catch (_) {failed.push('xray');}
+      if(failed.length) {
+        bot.log('partial emergency restore; retry or check modules',failed);
+        return false;
+      }
+      emergencySnapshot=null;
+      bot.storage.set('minibiaBot.emergencyStop',false);
+      bot.log('EMERGENCY RESUME: previously running modules restored');
       return true;
     };
     bot.ui.inject();
@@ -124,6 +172,8 @@
       floorMove: bot.floorMove.status(),
       corpseLoot: bot.corpseLoot.status(),
       autoSell: bot.autoSell.status(),
+      emergency: bot.emergencyState(),
+      navigation: bot.safeNavigation.status(),
     });
 
     window.minibiaBot = bot;

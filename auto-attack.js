@@ -345,7 +345,7 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
     // the target first in Stand mode and never begin following automatically.
     // If a native chase was enabled, disarm it BEFORE selecting a new target;
     // otherwise the server could begin following before our next tick.
-    if (config.meleeMode && config.avoidFloorChangesOnChase) {
+    if (config.meleeMode && (config.avoidFloorChangesOnChase || config.chaseController === "pathfinder")) {
       if (!disableUnsafeNativeChase()) return false;
     } else if (config.meleeMode && config.chaseController === "native") {
       ensureNativeChase();
@@ -447,17 +447,10 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
   // Only cancel an autowalk previously initiated by this module. Do not
   // interrupt a Cave Bot waypoint or an unrelated player move.
   function cancelPreviousMeleeChase() {
-    const pathfinder = window.gameClient?.world?.pathfinder;
-    const destination = normalizePosition(pathfinder?.__finalDestination);
-    if (!pathfinder || !destination ||
-        getPositionKey(destination) !== state.lastChaseDestinationKey ||
-        typeof pathfinder.setPathfindCache !== "function") {
-      return false;
-    }
-    pathfinder.setPathfindCache(null);
+    const cancelled = bot.safeNavigation?.cancel?.("attack") === true;
     state.lastChaseDestinationKey = null;
     state.lastChaseAt = 0;
-    return true;
+    return cancelled;
   }
 
   // Prefer the active monster and switch only when another is strictly closer
@@ -549,34 +542,10 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
     ) || null;
   }
 
-  // This is a chase-only safety guard. Cave Bot transitions remain untouched.
-  // Check the actual tile definition first; name matching is a conservative
-  // fallback for custom tiles that lack the floorchange flag.
+  // Use the same validated walk engine as Cave Bot. Never fall back to
+  // server map-click during melee pursuit, even when that client option is ON.
   function isFloorTransitionTile(tile) {
-    // Conservative: if terrain metadata is missing, never issue an automated
-    // chase step. The route recorder itself is unchanged (intentional stairs).
-    if (!tile || !tile.__position) return true;
-    const defs = window.gameClient;
-    const pieces = [tile, ...(Array.isArray(tile.items) ? tile.items : [])];
-    if (typeof tile.isNotPathable === "function" && tile.isNotPathable()) return true;
-    return pieces.some((piece) => {
-      const id = Number(piece?.id);
-      const def = defs?.itemDefinitionsByCid?.[id] ||
-        defs?.itemDefinitionsBySid?.[id] || defs?.itemDefinitions?.[id];
-      if (def?.properties?.floorchange) return true;
-      if (id === 1948 || id === 1968) return true;
-      const label = String(def?.properties?.name || piece?.name || '').toLowerCase();
-      return /\b(stairs?|staircase|ladder|hole|rope spot|ramp|teleport)\b/.test(label);
-    });
-  }
-
-  function isSafeMeleePath(path, currentFloor) {
-    // Validates the EXACT path that we later encode into an AutoWalkPacket.
-    // Never fall back to server map-click; its path cannot be inspected here.
-    return Array.isArray(path) && path.length > 0 && path.every((tile) =>
-      tile?.__position && Number(tile.__position.z) === Number(currentFloor) &&
-      !isFloorTransitionTile(tile)
-    );
+    return bot.safeNavigation?.isTransition?.(tile) !== false;
   }
 
   function disableUnsafeNativeChase() {
@@ -587,46 +556,13 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
     if (mode !== 0) {
       if (typeof selector?.setChaseMode !== 'function') return false;
       selector.setChaseMode(0);
-      bot.log('stair guard: native Auto Chase disabled; validated bot route owns pursuit');
+      bot.log('stair guard: native chase disabled');
     }
     return true;
   }
 
-  function sendValidatedMeleeWalk(playerPosition, targetPosition, path) {
-    const client = window.gameClient;
-    const pf = client?.world?.pathfinder;
-    const startTile = getTileFromPosition(playerPosition);
-    if (!pf || !startTile || typeof AutoWalkPacket !== 'function' ||
-        typeof Position !== 'function' ||
-        !isSafeMeleePath(path, playerPosition.z) ||
-        isFloorTransitionTile(getTileFromPosition(targetPosition))) return false;
-
-    // The earlier implementation called findPath(), which switches Safe Chase
-    // OFF, and with Server Mapclick enabled delegates route selection to the
-    // server. Here we transmit only a fully validated local A* path.
-    const directions = [];
-    let previous = startTile;
-    for (const tile of path) {
-      if (!tile?.__position || typeof previous.__position?.getLookDirection !== 'function') return false;
-      directions.push(previous.__position.getLookDirection(tile.__position));
-      previous = tile;
-    }
-    if (directions.length === 0) return false;
-
-    // Do not steal an active waypoint, manual walk or Rare-item movement.
-    const active = !!pf.__isAutoWalking;
-    const previousDestination = getPositionKey(normalizePosition(pf.__finalDestination));
-    if (active && previousDestination !== state.lastChaseDestinationKey) return false;
-
-    // Once owned, replacement pathing is safe: the new AutoWalkPacket supersedes
-    // our previous path on the server. Pathfinder state mirrors client.findPath.
-    pf.__finalDestination = new Position(targetPosition.x, targetPosition.y, targetPosition.z);
-    pf.__minimapWaypoints = null;
-    pf.__pathfindCache = [];
-    pf.__isAutoWalking = true;
-    pf.__autoWalkStepsRemaining = directions.length;
-    client.send(new AutoWalkPacket(directions));
-    return true;
+  function sendValidatedMeleeWalk(playerPosition, targetPosition) {
+    return bot.safeNavigation?.go?.('attack', targetPosition, {exactOnly:true, maxSteps:15})?.ok === true;
   }
 
   function findReachableAdjacentPosition(targetPosition, playerPosition) {
@@ -649,7 +585,7 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
 
     const pathfinder = window.gameClient?.world?.pathfinder;
     const startTile = getTileFromPosition(playerPosition);
-    if (!pathfinder || !startTile || typeof pathfinder.search !== "function") {
+    if (!pathfinder || !startTile || !bot.safeNavigation?.plan) {
       return null;
     }
 
@@ -675,20 +611,13 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
       }
 
       try {
-        const path = pathfinder.search(startTile, tile);
-        const safeFloor = config.avoidFloorChangesOnChase
-          ? isSafeMeleePath(path, playerPosition.z)
-          : Array.isArray(path) && path.length > 0;
-        const safeLeash = !leash || (Array.isArray(path) && path.every((node) =>
-          isInsideRoute(normalizePosition(node?.__position), leash)
-        ));
-        if (safeFloor && safeLeash) return { position: candidatePosition, path };
+        const route = bot.safeNavigation?.plan?.(playerPosition,candidatePosition,
+          {exactOnly:true,maxSteps:15});
+        const safeLeash = !leash || (route?.path?.every((node) =>
+          isInsideRoute(normalizePosition(node?.__position), leash)) === true);
+        if (route?.ok && safeLeash) return { position:candidatePosition, path:route.path };
       } catch (error) {
-        bot.log("auto attack reachability check failed", {
-          ...candidatePosition,
-          error: error?.message || error,
-        });
-        return null;
+        bot.log('auto attack safe route check failed',error?.message||error);
       }
     }
 
@@ -721,7 +650,7 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
 
     if (!isSameCreature(getCurrentTarget(), target)) return false;
 
-    if (config.avoidFloorChangesOnChase) {
+    if (config.avoidFloorChangesOnChase || config.chaseController === "pathfinder") {
       // Safety has precedence over Hybrid/Native/Bot. A native server chase
       // cannot be guaranteed to avoid stairs from client-side code.
       if (!disableUnsafeNativeChase()) return false;
@@ -767,7 +696,7 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
     const giveUpDelayMs = Math.max(12000, (Number(config.tickMs) || 0) * 24);
 
     if (isAdjacentTile(playerPosition, targetPosition)) {
-      state.lastChaseDestinationKey = null;
+      cancelPreviousMeleeChase();
       state.lastFollowStallAt = 0;
       // Keep movement progress information so a moving target is tracked
       // without allocating another target or toggling follow mode.
@@ -794,13 +723,15 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
 
     const destinationKey = getPositionKey(adjacentPosition);
     const pathfinder = window.gameClient?.world?.pathfinder;
-    if (!pathfinder || typeof pathfinder.findPath !== "function" || typeof Position !== "function")
-      return false;
+    if (!pathfinder || typeof Position !== "function" ||
+        ((!config.avoidFloorChangesOnChase && config.chaseController !== "pathfinder") &&
+          typeof pathfinder.findPath !== "function")) return false;
 
     // If Minibia completed/cancelled the autowalk, __finalDestination becomes
     // null. A stale lastChaseDestinationKey must not suppress reacquisition.
     const activeDestinationKey = getPositionKey(normalizePosition(pathfinder.__finalDestination));
-    const ownPathActive = activeDestinationKey === state.lastChaseDestinationKey &&
+    const ownPathActive = bot.safeNavigation?.owns?.("attack") &&
+      activeDestinationKey === state.lastChaseDestinationKey &&
       activeDestinationKey === destinationKey && pathfinder.__isAutoWalking !== false;
     const sameDestination = destinationKey === state.lastChaseDestinationKey;
     const elapsed = now - state.lastChaseAt;
@@ -814,8 +745,8 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
     try {
       // Do not cancel another module's movement. When we own the old path,
       // replace it using a freshly validated route (without map-click).
-      if (config.avoidFloorChangesOnChase) {
-        if (!sendValidatedMeleeWalk(playerPosition, adjacentPosition, safeRoute.path)) return false;
+      if (config.avoidFloorChangesOnChase || config.chaseController === "pathfinder") {
+        if (!sendValidatedMeleeWalk(playerPosition, adjacentPosition)) return false;
       } else {
         if (ownPathActive && idleForMs >= 2200) cancelPreviousMeleeChase();
         pathfinder.findPath(

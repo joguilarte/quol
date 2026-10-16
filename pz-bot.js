@@ -511,6 +511,142 @@ window.__minibiaBotBundle.createBot = function createBot() {
     },
   };
 };
+// Shared, fail-closed same-floor autowalk for Cave Bot and melee pursuit.
+// No server-side mapclick fallback: every transmitted step is checked locally.
+window.__minibiaBotBundle = window.__minibiaBotBundle || {};
+window.__minibiaBotBundle.installSafeNavigationModule = function installSafeNavigationModule(bot) {
+  const state = { owner: null, destinationKey: null, requestedKey: null, lastError: null, lastErrorAt: 0, lastSentAt: 0 };
+  const getPos = (value) => {
+    const p = value?.__position || value;
+    const x = Number(p?.x), y = Number(p?.y), z = Number(p?.z);
+    return [x,y,z].every(Number.isFinite) ? {x:Math.trunc(x),y:Math.trunc(y),z:Math.trunc(z)} : null;
+  };
+  const key = (p) => p ? `${p.x},${p.y},${p.z}` : null;
+  const dist = (a,b) => Math.max(Math.abs(a.x-b.x), Math.abs(a.y-b.y));
+  function getTile(p) {
+    if (!p || typeof Position !== 'function') return null;
+    return window.gameClient?.world?.getTileFromWorldPosition?.(new Position(p.x,p.y,p.z)) || null;
+  }
+  function isTransition(tile) {
+    if (!tile?.__position || !Number(tile.id)) return true;
+    const client = window.gameClient;
+    const pieces = [tile,...(Array.isArray(tile.items) ? tile.items : [])];
+    for (const thing of pieces) {
+      if (!thing || !Number(thing.id)) continue;
+      const id = Number(thing.id);
+      const def = client?.itemDefinitionsByCid?.[id] || client?.itemDefinitionsBySid?.[id] || client?.itemDefinitions?.[id];
+      // Unknown ground/item metadata cannot certify the tile as non-transition.
+      if (!def?.properties) return true;
+      if (!!def.properties.floorchange || id === 1948 || id === 1968) return true;
+      const name = String(def.properties.name || thing.name || '').toLowerCase();
+      if (/\b(stairs?|staircase|ladder|hole|rope spot|ramp|teleport)\b/.test(name)) return true;
+    }
+    return false;
+  }
+  function traversable(tile, floor) {
+    return !!tile?.__position && Number(tile.__position.z) === floor && !isTransition(tile) &&
+      typeof tile.isOccupied === 'function' && tile.isOccupied() === false &&
+      (typeof tile.isNotPathable !== 'function' || tile.isNotPathable() === false);
+  }
+  function safeEdge(fromTile, toTile, floor) {
+    const a = getPos(fromTile), b = getPos(toTile);
+    if (!a || !b || a.z !== floor || b.z !== floor ||
+        Math.abs(a.x-b.x) > 1 || Math.abs(a.y-b.y) > 1 || (a.x===b.x && a.y===b.y) ||
+        !traversable(toTile,floor)) return false;
+    if (a.x !== b.x && a.y !== b.y) {
+      // No diagonal shortcuts beside stairs, unknown tiles or blocked terrain.
+      if (!traversable(getTile({x:b.x,y:a.y,z:floor}),floor) ||
+          !traversable(getTile({x:a.x,y:b.y,z:floor}),floor)) return false;
+    }
+    return true;
+  }
+  function plan(fromValue, toValue, options={}) {
+    const from = getPos(fromValue), to = getPos(toValue);
+    if (!from || !to || from.z!==to.z) return {ok:false,reason:'different/missing floor'};
+    if (key(from)===key(to)) return {ok:true,path:[],destination:from,exact:true};
+    const start = getTile(from), finish = getTile(to);
+    if (!start || !start.__position || (finish && isTransition(finish))) return {ok:false,reason:'missing source or unsafe destination'};
+    const limit = Math.max(1,Math.min(20,Number(options.maxSteps)||10));
+    const budget = Math.max(100,Math.min(2400,Number(options.maxNodes)||1200));
+    const exactOnly = options.exactOnly === true;
+    const nodes = new Map([[key(from),{tile:start,g:0,parent:null}]]);
+    const frontier = [nodes.get(key(from))];
+    let best = null, bestScore = dist(from,to), explored=0, nextIndex=0;
+    // Bounded BFS prevents repeated priority-queue sorting every combat tick.
+    while (nextIndex<frontier.length && explored++<budget) {
+      const current = frontier[nextIndex++];
+      const at = getPos(current.tile);
+      if (key(at)===key(to)) {best=current;break;}
+      if (current.g>=limit) continue;
+      for (const neighbor of current.tile.neighbours||[]) {
+        if (!safeEdge(current.tile,neighbor,from.z)) continue;
+        const p=getPos(neighbor), k=key(p);
+        if (nodes.has(k)) continue;
+        const next={tile:neighbor,g:current.g+1,parent:current};
+        nodes.set(k,next);frontier.push(next);
+        const score=dist(p,to);
+        if (score<bestScore) {best=next;bestScore=score;}
+      }
+    }
+    if (!best || (exactOnly && key(getPos(best.tile))!==key(to)))
+      return {ok:false,reason: 'no locally validated same-floor route'};
+    const path=[];
+    for(let cursor=best;cursor?.parent;cursor=cursor.parent) path.unshift(cursor.tile);
+    if (!path.length || path.some((tile,i)=>!safeEdge(i===0?start:path[i-1],tile,from.z)))
+      return {ok:false,reason:'invalidated path'};
+    return {ok:true,path,destination:getPos(path[path.length-1]),exact:key(getPos(path[path.length-1]))===key(to)};
+  }
+  function owns(owner) {
+    const pf=window.gameClient?.world?.pathfinder;
+    return state.owner===owner && state.destinationKey &&
+      key(getPos(pf?.__finalDestination))===state.destinationKey;
+  }
+  function cancel(owner) {
+    if (!owns(owner)) {
+      if (state.owner===owner) {state.owner=null;state.destinationKey=null;state.requestedKey=null;}
+      return false;
+    }
+    const pf=window.gameClient?.world?.pathfinder;
+    pf?.setPathfindCache?.(null);
+    state.owner=null;state.destinationKey=null;state.requestedKey=null;
+    return true;
+  }
+  function go(owner,to,options={}) {
+    if (owner!=='attack' && owner!=='cave') return {ok:false,reason:'unknown owner'};
+    const client=window.gameClient,pf=client?.world?.pathfinder;
+    const player=getPos(bot.getPlayerPosition());
+    if (!pf || !player || typeof client?.send!=='function' ||
+        typeof AutoWalkPacket!=='function' || typeof Position!=='function') return {ok:false,reason:'game client unavailable'};
+    const active=!!pf.__isAutoWalking;
+    const activeDestination=key(getPos(pf.__finalDestination));
+    if (active && (!state.owner || !state.destinationKey || activeDestination!==state.destinationKey || state.owner!==owner))
+      return {ok:false,reason:'movement owned by another controller'};
+    if (!active && state.owner && state.owner!==owner) {state.owner=null;state.destinationKey=null;}
+    const result=plan(player,to,options);
+    if (!result.ok) {state.lastError=result.reason;state.lastErrorAt=Date.now();return result;}
+    if (!result.path.length) return {ok:true,alreadyThere:true,destination:player};
+    const nextKey=key(result.destination), requestKey=key(getPos(to));
+    if (owns(owner) && state.destinationKey===nextKey && Date.now()-state.lastSentAt<1800)
+      return {ok:true,ongoing:true,destination:result.destination};
+    const directions=[]; let previous=getTile(player);
+    for (const tile of result.path) {
+      if (!safeEdge(previous,tile,player.z) || typeof previous?.__position?.getLookDirection!=='function')
+        return {ok:false,reason:'unsafe path during send'};
+      directions.push(previous.__position.getLookDirection(tile.__position));previous=tile;
+    }
+    if (!directions.length) return {ok:false,reason:'empty validated walk'};
+    // Mirror the client's AutoWalkPacket bookkeeping; no server map-click.
+    pf.__finalDestination=new Position(result.destination.x,result.destination.y,result.destination.z);
+    pf.__minimapWaypoints=null;
+    pf.__pathfindCache=[];
+    pf.__isAutoWalking=true;
+    pf.__autoWalkStepsRemaining=directions.length;
+    state.owner=owner;state.destinationKey=nextKey;state.requestedKey=requestKey;state.lastSentAt=Date.now();
+    client.send(new AutoWalkPacket(directions));
+    return {ok:true,destination:result.destination,exact:result.exact,steps:directions.length};
+  }
+  bot.safeNavigation={go,plan,cancel,owns,isTransition,status:()=>({...state})};
+};
 window.__minibiaBotBundle = window.__minibiaBotBundle || {};
 
 window.__minibiaBotBundle.installPzModule = function installPzModule(bot) {
@@ -3174,7 +3310,7 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
     // the target first in Stand mode and never begin following automatically.
     // If a native chase was enabled, disarm it BEFORE selecting a new target;
     // otherwise the server could begin following before our next tick.
-    if (config.meleeMode && config.avoidFloorChangesOnChase) {
+    if (config.meleeMode && (config.avoidFloorChangesOnChase || config.chaseController === "pathfinder")) {
       if (!disableUnsafeNativeChase()) return false;
     } else if (config.meleeMode && config.chaseController === "native") {
       ensureNativeChase();
@@ -3276,17 +3412,10 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
   // Only cancel an autowalk previously initiated by this module. Do not
   // interrupt a Cave Bot waypoint or an unrelated player move.
   function cancelPreviousMeleeChase() {
-    const pathfinder = window.gameClient?.world?.pathfinder;
-    const destination = normalizePosition(pathfinder?.__finalDestination);
-    if (!pathfinder || !destination ||
-        getPositionKey(destination) !== state.lastChaseDestinationKey ||
-        typeof pathfinder.setPathfindCache !== "function") {
-      return false;
-    }
-    pathfinder.setPathfindCache(null);
+    const cancelled = bot.safeNavigation?.cancel?.("attack") === true;
     state.lastChaseDestinationKey = null;
     state.lastChaseAt = 0;
-    return true;
+    return cancelled;
   }
 
   // Prefer the active monster and switch only when another is strictly closer
@@ -3378,34 +3507,10 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
     ) || null;
   }
 
-  // This is a chase-only safety guard. Cave Bot transitions remain untouched.
-  // Check the actual tile definition first; name matching is a conservative
-  // fallback for custom tiles that lack the floorchange flag.
+  // Use the same validated walk engine as Cave Bot. Never fall back to
+  // server map-click during melee pursuit, even when that client option is ON.
   function isFloorTransitionTile(tile) {
-    // Conservative: if terrain metadata is missing, never issue an automated
-    // chase step. The route recorder itself is unchanged (intentional stairs).
-    if (!tile || !tile.__position) return true;
-    const defs = window.gameClient;
-    const pieces = [tile, ...(Array.isArray(tile.items) ? tile.items : [])];
-    if (typeof tile.isNotPathable === "function" && tile.isNotPathable()) return true;
-    return pieces.some((piece) => {
-      const id = Number(piece?.id);
-      const def = defs?.itemDefinitionsByCid?.[id] ||
-        defs?.itemDefinitionsBySid?.[id] || defs?.itemDefinitions?.[id];
-      if (def?.properties?.floorchange) return true;
-      if (id === 1948 || id === 1968) return true;
-      const label = String(def?.properties?.name || piece?.name || '').toLowerCase();
-      return /\b(stairs?|staircase|ladder|hole|rope spot|ramp|teleport)\b/.test(label);
-    });
-  }
-
-  function isSafeMeleePath(path, currentFloor) {
-    // Validates the EXACT path that we later encode into an AutoWalkPacket.
-    // Never fall back to server map-click; its path cannot be inspected here.
-    return Array.isArray(path) && path.length > 0 && path.every((tile) =>
-      tile?.__position && Number(tile.__position.z) === Number(currentFloor) &&
-      !isFloorTransitionTile(tile)
-    );
+    return bot.safeNavigation?.isTransition?.(tile) !== false;
   }
 
   function disableUnsafeNativeChase() {
@@ -3416,46 +3521,13 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
     if (mode !== 0) {
       if (typeof selector?.setChaseMode !== 'function') return false;
       selector.setChaseMode(0);
-      bot.log('stair guard: native Auto Chase disabled; validated bot route owns pursuit');
+      bot.log('stair guard: native chase disabled');
     }
     return true;
   }
 
-  function sendValidatedMeleeWalk(playerPosition, targetPosition, path) {
-    const client = window.gameClient;
-    const pf = client?.world?.pathfinder;
-    const startTile = getTileFromPosition(playerPosition);
-    if (!pf || !startTile || typeof AutoWalkPacket !== 'function' ||
-        typeof Position !== 'function' ||
-        !isSafeMeleePath(path, playerPosition.z) ||
-        isFloorTransitionTile(getTileFromPosition(targetPosition))) return false;
-
-    // The earlier implementation called findPath(), which switches Safe Chase
-    // OFF, and with Server Mapclick enabled delegates route selection to the
-    // server. Here we transmit only a fully validated local A* path.
-    const directions = [];
-    let previous = startTile;
-    for (const tile of path) {
-      if (!tile?.__position || typeof previous.__position?.getLookDirection !== 'function') return false;
-      directions.push(previous.__position.getLookDirection(tile.__position));
-      previous = tile;
-    }
-    if (directions.length === 0) return false;
-
-    // Do not steal an active waypoint, manual walk or Rare-item movement.
-    const active = !!pf.__isAutoWalking;
-    const previousDestination = getPositionKey(normalizePosition(pf.__finalDestination));
-    if (active && previousDestination !== state.lastChaseDestinationKey) return false;
-
-    // Once owned, replacement pathing is safe: the new AutoWalkPacket supersedes
-    // our previous path on the server. Pathfinder state mirrors client.findPath.
-    pf.__finalDestination = new Position(targetPosition.x, targetPosition.y, targetPosition.z);
-    pf.__minimapWaypoints = null;
-    pf.__pathfindCache = [];
-    pf.__isAutoWalking = true;
-    pf.__autoWalkStepsRemaining = directions.length;
-    client.send(new AutoWalkPacket(directions));
-    return true;
+  function sendValidatedMeleeWalk(playerPosition, targetPosition) {
+    return bot.safeNavigation?.go?.('attack', targetPosition, {exactOnly:true, maxSteps:15})?.ok === true;
   }
 
   function findReachableAdjacentPosition(targetPosition, playerPosition) {
@@ -3478,7 +3550,7 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
 
     const pathfinder = window.gameClient?.world?.pathfinder;
     const startTile = getTileFromPosition(playerPosition);
-    if (!pathfinder || !startTile || typeof pathfinder.search !== "function") {
+    if (!pathfinder || !startTile || !bot.safeNavigation?.plan) {
       return null;
     }
 
@@ -3504,20 +3576,13 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
       }
 
       try {
-        const path = pathfinder.search(startTile, tile);
-        const safeFloor = config.avoidFloorChangesOnChase
-          ? isSafeMeleePath(path, playerPosition.z)
-          : Array.isArray(path) && path.length > 0;
-        const safeLeash = !leash || (Array.isArray(path) && path.every((node) =>
-          isInsideRoute(normalizePosition(node?.__position), leash)
-        ));
-        if (safeFloor && safeLeash) return { position: candidatePosition, path };
+        const route = bot.safeNavigation?.plan?.(playerPosition,candidatePosition,
+          {exactOnly:true,maxSteps:15});
+        const safeLeash = !leash || (route?.path?.every((node) =>
+          isInsideRoute(normalizePosition(node?.__position), leash)) === true);
+        if (route?.ok && safeLeash) return { position:candidatePosition, path:route.path };
       } catch (error) {
-        bot.log("auto attack reachability check failed", {
-          ...candidatePosition,
-          error: error?.message || error,
-        });
-        return null;
+        bot.log('auto attack safe route check failed',error?.message||error);
       }
     }
 
@@ -3550,7 +3615,7 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
 
     if (!isSameCreature(getCurrentTarget(), target)) return false;
 
-    if (config.avoidFloorChangesOnChase) {
+    if (config.avoidFloorChangesOnChase || config.chaseController === "pathfinder") {
       // Safety has precedence over Hybrid/Native/Bot. A native server chase
       // cannot be guaranteed to avoid stairs from client-side code.
       if (!disableUnsafeNativeChase()) return false;
@@ -3596,7 +3661,7 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
     const giveUpDelayMs = Math.max(12000, (Number(config.tickMs) || 0) * 24);
 
     if (isAdjacentTile(playerPosition, targetPosition)) {
-      state.lastChaseDestinationKey = null;
+      cancelPreviousMeleeChase();
       state.lastFollowStallAt = 0;
       // Keep movement progress information so a moving target is tracked
       // without allocating another target or toggling follow mode.
@@ -3623,13 +3688,15 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
 
     const destinationKey = getPositionKey(adjacentPosition);
     const pathfinder = window.gameClient?.world?.pathfinder;
-    if (!pathfinder || typeof pathfinder.findPath !== "function" || typeof Position !== "function")
-      return false;
+    if (!pathfinder || typeof Position !== "function" ||
+        ((!config.avoidFloorChangesOnChase && config.chaseController !== "pathfinder") &&
+          typeof pathfinder.findPath !== "function")) return false;
 
     // If Minibia completed/cancelled the autowalk, __finalDestination becomes
     // null. A stale lastChaseDestinationKey must not suppress reacquisition.
     const activeDestinationKey = getPositionKey(normalizePosition(pathfinder.__finalDestination));
-    const ownPathActive = activeDestinationKey === state.lastChaseDestinationKey &&
+    const ownPathActive = bot.safeNavigation?.owns?.("attack") &&
+      activeDestinationKey === state.lastChaseDestinationKey &&
       activeDestinationKey === destinationKey && pathfinder.__isAutoWalking !== false;
     const sameDestination = destinationKey === state.lastChaseDestinationKey;
     const elapsed = now - state.lastChaseAt;
@@ -3643,8 +3710,8 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
     try {
       // Do not cancel another module's movement. When we own the old path,
       // replace it using a freshly validated route (without map-click).
-      if (config.avoidFloorChangesOnChase) {
-        if (!sendValidatedMeleeWalk(playerPosition, adjacentPosition, safeRoute.path)) return false;
+      if (config.avoidFloorChangesOnChase || config.chaseController === "pathfinder") {
+        if (!sendValidatedMeleeWalk(playerPosition, adjacentPosition)) return false;
       } else {
         if (ownPathActive && idleForMs >= 2200) cancelPreviousMeleeChase();
         pathfinder.findPath(
@@ -3945,6 +4012,7 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     lastObservedPosition: null,
     pendingTransitionSource: null,
     pausedForCombat: false,
+    expectedFloor: null,
     pausedForFloorMove: false,
     lastWaypointWalkDestinationKey: null,
     lastPriorityMonsterSeenAt: 0,
@@ -3975,6 +4043,7 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
       repathMs: 1500,
       autoRecoverWaypoints: true,
       waypointTolerance: 0,
+      allowFloorTransitions: false, // explicit opt-in for intentional cross-floor waypoints
       prioritizeMonsters: false, // opt-in: pause waypoint navigation during fights
       limitChaseToRoute: false, // opt-in: do not chase mobs outside recorded route area
       maxChaseFromRouteTiles: 6,
@@ -3993,6 +4062,7 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     bot.storage.get(configStorageKey, {})
   );
   config.tickMs = 500;
+  config.allowFloorTransitions = config.allowFloorTransitions === true;
   config.prioritizeMonsters = config.prioritizeMonsters === true;
   config.autoRecoverWaypoints = config.autoRecoverWaypoints !== false;
   config.limitChaseToRoute = config.limitChaseToRoute === true;
@@ -4974,51 +5044,30 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
   }
 
   function goToWaypoint(waypoint) {
-    const from = bot.getPlayerPosition();
-    const pf = window.gameClient?.world?.pathfinder;
-    if (!from || !waypoint || typeof Position !== "function" ||
-        typeof pf?.findPath !== "function") return false;
-
+    const from = normalizePosition(bot.getPlayerPosition());
+    if (!from || !waypoint || !bot.safeNavigation?.go) return false;
     const now = Date.now();
-    const requestedKey = getPositionKey(waypoint);
-    const activeKey = getPositionKey(normalizePosition(pf.__finalDestination));
-    const walkingToRequested = activeKey === requestedKey &&
-      state.lastWaypointWalkDestinationKey === requestedKey &&
-      pf.__isAutoWalking !== false;
-
-    // The previous bot called findPath every 1.5s, even during a healthy
-    // autowalk. Minibia's findPath sends StopWalkPacket for that case.
-    // Keep an active walk unless position has stopped changing for 4s.
-    if (walkingToRequested && now - state.lastProgressAt < 4000) return true;
-    if (walkingToRequested && typeof pf.setPathfindCache === "function") {
-      cancelOwnWaypointWalk(); // cancel ONLY our old stuck autowalk
-    }
-    state.lastPathAt = now;
-    const to = new Position(waypoint.x, waypoint.y, waypoint.z);
-    try {
-      pf.findPath(from, to);
-      const startedKey = getPositionKey(normalizePosition(pf.__finalDestination));
-      if (startedKey !== requestedKey) {
-        state.lastWaypointWalkDestinationKey = null;
-        state.lastRoutePathError = "pathfinder did not accept waypoint destination";
-        state.lastRoutePathErrorAt = now;
-        if (now - state.lastRouteRecoveryWarningAt >= 8000) {
-          state.lastRouteRecoveryWarningAt = now;
-          bot.log("cave path unavailable; will retry without skipping waypoint", {
-            waypoint, index: state.currentIndex + 1,
-          });
-        }
-        return false;
+    const pf = window.gameClient?.world?.pathfinder;
+    // Continue a healthy, verified route segment; never spam StopWalkPacket.
+    if (bot.safeNavigation.owns('cave') && pf?.__isAutoWalking &&
+        now-state.lastProgressAt<3500) return true;
+    if (now-state.lastPathAt<800) return false;
+    if (bot.safeNavigation.owns('cave')) bot.safeNavigation.cancel('cave');
+    state.lastPathAt=now;
+    const result = bot.safeNavigation.go('cave',waypoint,{maxSteps:10});
+    if (!result.ok) {
+      state.lastRoutePathError=result.reason;
+      state.lastRoutePathErrorAt=now;
+      if (now-state.lastRouteRecoveryWarningAt>=8000) {
+        state.lastRouteRecoveryWarningAt=now;
+        bot.log('cave blocked unsafe/unavailable path; waypoint unchanged',
+          {waypoint,index:state.currentIndex+1,reason:result.reason});
       }
-      state.lastRoutePathError = null;
-      state.lastWaypointWalkDestinationKey = requestedKey;
-      return true;
-    } catch (error) {
-      state.lastRoutePathError = String(error?.message || error);
-      state.lastRoutePathErrorAt = now;
-      bot.log("cave pathing failed", { ...waypoint, error: state.lastRoutePathError });
       return false;
     }
+    state.lastWaypointWalkDestinationKey=getPositionKey(result.destination);
+    state.lastRoutePathError=null;
+    return true;
   }
 
   function goToPosition(position) {
@@ -5278,7 +5327,31 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     }
 
     if (!isSameTile(position, targetPosition)) {
-      return goToPosition(targetPosition);
+      // Deliberate cross-floor waypoint only: approach safely, then step on
+      // the actual transition with ONE explicit direction (never mapclick).
+      if (!config.allowFloorTransitions || waypoint?.z === position.z) return false;
+      if (!isAdjacentTile(position, targetPosition)) {
+        const adjacent=findAdjacentWalkablePosition(targetPosition,position);
+        return adjacent ? goToPosition(adjacent) : false;
+      }
+      const pf=window.gameClient?.world?.pathfinder;
+      if (pf?.__isAutoWalking && !bot.safeNavigation?.owns?.('cave')) return false;
+      const fromTile=getTileAt(position);
+      if (!fromTile?.__position || typeof fromTile.__position.getLookDirection!=="function" ||
+          typeof AutoWalkPacket!=="function" || !pf) return false;
+      bot.safeNavigation?.cancel?.('cave');
+      const direction=fromTile.__position.getLookDirection(targetTile.__position);
+      const client=window.gameClient;
+      // The only unchecked destination is the exact, chosen floorchange tile.
+      pf.__finalDestination=new Position(targetPosition.x,targetPosition.y,targetPosition.z);
+      pf.__minimapWaypoints=null;
+      pf.__pathfindCache=[];
+      pf.__isAutoWalking=true;
+      pf.__autoWalkStepsRemaining=1;
+      client.send(new AutoWalkPacket([direction]));
+      state.lastStairsUseAt=now;
+      markPendingTransitionSource(targetPosition);
+      return true;
     }
 
     const currentTile = getTileAt(position);
@@ -5298,6 +5371,7 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
   }
 
   function handleFloorChange(waypoint, now = Date.now()) {
+    if (!config.allowFloorTransitions) return false;
     const position = normalizePosition(bot.getPlayerPosition());
     if (!position || !waypoint || position.z === waypoint.z) {
       return false;
@@ -5378,17 +5452,12 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
   // cancel it only when the active destination matches the last waypoint
   // navigation request. Never cancel a melee chase or manual movement.
   function cancelOwnWaypointWalk() {
-    const pathfinder = window.gameClient?.world?.pathfinder;
-    const activeDestinationKey = getPositionKey(normalizePosition(pathfinder?.__finalDestination));
-    if (!activeDestinationKey || !state.lastWaypointWalkDestinationKey ||
-        activeDestinationKey !== state.lastWaypointWalkDestinationKey ||
-        typeof pathfinder?.setPathfindCache !== "function") {
-      return false;
+    const cancelled=bot.safeNavigation?.cancel?.('cave') === true;
+    if (cancelled) {
+      state.lastWaypointWalkDestinationKey=null;
+      state.lastPathAt=0;
     }
-    pathfinder.setPathfindCache(null);
-    state.lastWaypointWalkDestinationKey = null;
-    state.lastPathAt = 0;
-    return true;
+    return cancelled;
   }
 
   // The floor-item mover may temporarily own movement to a visible item.
@@ -5692,6 +5761,11 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     }
     // Reuse the same learned stair/hole handling as intentional Cave Bot routes.
     if (destination?.z !== position.z) {
+      if (!config.allowFloorTransitions) {
+        bot.log('seller route blocked: explicit floor transitions are OFF');
+        stop();bot.playAlarm?.();return true;
+      }
+      state.expectedFloor=null;
       handleFloorChange(destination, now);
     } else if (now - state.lastPathAt >= config.repathMs ||
       now - state.lastProgressAt >= config.repathMs) {
@@ -5714,11 +5788,23 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
       const position = normalizePosition(bot.getPlayerPosition());
       const positionKey = getPositionKey(position);
       const now = Date.now();
+      if (config.allowFloorTransitions && state.expectedFloor === null && position) state.expectedFloor=position.z;
       if (positionKey && positionKey !== state.lastPositionKey) {
         state.lastPositionKey = positionKey;
         state.lastProgressAt = now;
       }
 
+      // The server may still teleport the player unexpectedly. Stop instead of
+      // resuming the route on another floor (never auto-recover via stairs).
+      if (!config.allowFloorTransitions && state.expectedFloor !== null &&
+          position && position.z !== state.expectedFloor) {
+        bot.log('UNEXPECTED FLOOR CHANGE: cave and melee stopped',
+          {expected:state.expectedFloor,observed:position.z});
+        bot.attack?.stop?.();
+        stop();
+        bot.playAlarm?.();
+        return;
+      }
       // Pause *only* cave navigation. Auto Attack and Auto Heal remain active.
       if (config.pauseWaypointsOnVerification && state.pausedForVerification) {
         cancelOwnWaypointWalk();
@@ -5825,6 +5911,15 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
       }
 
       if (position && waypoint.z !== position.z) {
+        if (!config.allowFloorTransitions) {
+          state.lastRoutePathError='floor transition blocked (enable intentional transitions explicitly)';
+          state.lastRoutePathErrorAt=now;
+          stop();
+          bot.playAlarm?.();
+          bot.log('cave stopped: waypoint requires a forbidden floor change',waypoint);
+          return;
+        }
+        state.expectedFloor=null; // deliberate transition: no false emergency while changing floors
         handleFloorChange(waypoint, now);
         return;
       }
@@ -5891,6 +5986,7 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     }
     state.lastPathAt = 0;
     state.lastPositionKey = getPositionKey(position);
+    state.expectedFloor = position?.z ?? null;
     state.lastProgressAt = Date.now();
     state.pausedForCombat = false;
     state.lastWaypointWalkDestinationKey = null;
@@ -5924,6 +6020,7 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
       persistConfig();
     }
     state.pausedForCombat = false;
+    state.expectedFloor = null;
     const abandonedSellerTrip = state.sellerTrip;
     cancelOwnWaypointWalk();
     state.sellerTrip = null;
@@ -6046,6 +6143,7 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
       lastProgressAt: state.lastProgressAt,
       pendingTransitionSource: cloneValue(state.pendingTransitionSource),
       pausedForCombat: state.pausedForCombat,
+      expectedFloor: state.expectedFloor,
       pausedForFloorMove: state.pausedForFloorMove,
       pausedForVerification: state.pausedForVerification && config.pauseWaypointsOnVerification,
       lastVerificationNotice: state.lastVerificationNotice,
@@ -6057,6 +6155,7 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
 
   function updateConfig(nextConfig = {}) {
     Object.assign(config, nextConfig);
+    config.allowFloorTransitions = config.allowFloorTransitions === true;
     config.prioritizeMonsters = config.prioritizeMonsters === true;
     config.autoRecoverWaypoints = config.autoRecoverWaypoints !== false;
     config.limitChaseToRoute = config.limitChaseToRoute === true;
@@ -9300,7 +9399,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
       #minibia-bot-emergency-stop:hover, #minibia-bot-emergency-stop:focus-visible,
       #minibia-bot-emergency-stop[data-dragging="true"] { opacity:1; }
       #minibia-bot-emergency-stop:focus-visible { outline:2px solid #fff; outline-offset:2px; }
-      #minibia-bot-emergency-stop[data-halted="true"] { background:#55585c; }
+      #minibia-bot-emergency-stop[data-halted="true"] { background:#306a46; }
       #minibia-bot-emergency-stop[data-dragging="true"] { cursor:grabbing; transition:none; }
       #minibia-bot-panel #minibia-bot-auto-sell-items { min-height:58px; resize:vertical; }
       @container (max-width:1060px) { #minibia-bot-panel .mb-quick-bar { grid-column:1 / -1; grid-row: 1; }
@@ -9559,6 +9658,8 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
                 <input type="number" id="minibia-bot-cave-max-chase" min="2" max="20" step="1" value="6" />
               </label>
               <div class="mb-small-note">Only with Cave Bot running and Melee Mode on. Stop chasing beyond the radius and resume waypoints. Add intermediate waypoints along long corridors.</div>
+              <label class="mb-toggle"><input type="checkbox" id="minibia-bot-cave-allow-floors"/><span>Allow intentional floor changes (OFF for single-floor hunts)</span></label>
+              <div class="mb-small-note">Same-floor Cave navigation always validates every step locally. If OFF, a waypoint requiring another floor stops Cave Bot instead of crossing stairs. If ON, explicit cross-floor waypoints can still use learned transition actions.</div>
               <label class="mb-toggle"><input type="checkbox" id="minibia-bot-cave-tools"/><span>Use shovel / rope on waypoint floor changes</span></label>
               <div class="mb-small-note">Only deliberate waypoint transitions; not melee pursuit.</div>
               <div class="mb-label">Seller Return (capacity)</div>
@@ -9631,7 +9732,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
                 <input type="checkbox" id="minibia-bot-auto-attack-avoid-stairs" />
                 <span>Strict stair protection (all pursuit modes)</span>
               </label>
-              <div class="mb-small-note">When ON, safety overrides Hybrid/Native and uses only locally validated bot paths. The game's native chase/follow is turned OFF during automatic melee attacks. Intentional Cave Bot stair waypoints are unaffected. When OFF, the selected pursuit method works normally without guaranteed stair avoidance.</div>
+              <div class="mb-small-note">When ON, safety overrides Hybrid/Native and uses only locally validated bot paths. The game's native chase/follow is turned OFF during automatic melee attacks. Cave Bot blocks all unintended floor changes; deliberate cross-floor routes require the separate Allow intentional floor changes option. When OFF, the selected pursuit method works normally without guaranteed stair avoidance.</div>
               <label class="mb-field" for="minibia-bot-auto-attack-hotkey">
                 <span class="mb-field-label">Target Hotkey (1-12)</span>
                 <input type="number" id="minibia-bot-auto-attack-hotkey" min="1" max="12" placeholder="3" />
@@ -9657,15 +9758,21 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
       <div class="mb-quick-head"><strong>QUICK HUNT</strong><span class="mb-quick-hint">One click to start your saved hunt</span></div>
       <label class="mb-quick-route">Hunt route <select id="minibia-bot-quick-route"></select></label>
       <div class="mb-quick-settings">
-        <label class="mb-toggle"><input id="minibia-bot-quick-prioritize" type="checkbox" checked /><span>Prioritize monsters (pause waypoints while fighting)</span></label>
-        <span class="mb-quick-hint">Auto Attack starts automatically</span>
+        <label class="mb-toggle"><input id="minibia-bot-quick-attack" type="checkbox"/><span>Auto Attack</span></label>
+        <label class="mb-toggle"><input id="minibia-bot-quick-melee" type="checkbox"/><span>Melee Mode</span></label>
+        <label class="mb-toggle"><input id="minibia-bot-quick-stairs" type="checkbox"/><span>Strict stair protection</span></label>
+        <label class="mb-toggle"><input id="minibia-bot-quick-prioritize" type="checkbox"/><span>Prioritize Monsters</span></label>
+        <label class="mb-toggle"><input id="minibia-bot-quick-leash" type="checkbox"/><span>Limit chase to route</span></label>
+        <label class="mb-toggle"><input id="minibia-bot-quick-heal" type="checkbox"/><span>Auto Heal</span></label>
+        <label class="mb-toggle"><input id="minibia-bot-quick-talk" type="checkbox"/><span>Auto Reply (Gemini)</span></label>
+        <label class="mb-quick-hint" for="minibia-bot-quick-chase">Chase <select id="minibia-bot-quick-chase"><option value="pathfinder">Bot pathfinding</option><option value="hybrid">Hybrid</option><option value="native">Native</option></select></label>
       </div>
-      <div class="mb-quick-summary" id="minibia-bot-quick-summary">Will start Cave Bot + Auto Attack with saved combat settings.</div>
+      <div class="mb-quick-summary" id="minibia-bot-quick-summary">Quick toggles control the same settings as advanced panels; START HUNT starts the selected route.</div>
       <div class="mb-quick-actions">
         <button id="minibia-bot-quick-start" type="button">START HUNT</button>
         <button id="minibia-bot-quick-stop" type="button">STOP HUNT</button>
       </div>
-      <div class="mb-small-note" id="minibia-bot-quick-status">Stopped. Saved settings never auto-start on login.</div>`;
+      <div class="mb-small-note" id="minibia-bot-quick-status">Stopped. Toggles apply immediately; START HUNT starts Cave Bot.</div>`;
     panel.querySelector(".mb-body")?.prepend(quickBar);
     function foldSections(columnClass, titleFor) {
       const column = panel.querySelector(columnClass);
@@ -9776,20 +9883,23 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     emergencyButton.setAttribute("aria-keyshortcuts", "Control+Shift+X");
     document.body.appendChild(emergencyButton);
 
-    // The red handle is an emergency action, not a toggle: pressing it again never restarts automation.
-    // The grey state indicates the last emergency stop only while no known automation is running.
-    const emergencyActiveModules = ["attack", "cave", "heal", "rune", "eat", "invisible", "magicShield", "equipRing", "talk", "floorMove", "corpseLoot", "panic"];
+    // Emergency is a two-stage latch: STOP, then intentional RESUME.
+    // Only the modules running before STOP are restored.
     function refreshEmergencyButton() {
-      const running = emergencyActiveModules.some((module) => {
-        try { return bot[module]?.status?.()?.running === true; } catch (_) { return false; }
-      });
-      const halted = !!bot.storage.get("minibiaBot.emergencyStop", false) && !running;
-      emergencyButton.dataset.halted = String(halted);
-      emergencyButton.setAttribute("aria-label", halted ? "Emergency stop applied; manual control (Ctrl+Shift+X)" : "Emergency stop: take manual control (Ctrl+Shift+X)");
-      emergencyButton.title = halted ? "Emergency stop applied · Manual control · Ctrl+Shift+X" : "STOP ALL · Ctrl+Shift+X · Drag to reposition";
+      const emergency=bot.emergencyState?.()||{};
+      const halted=!!emergency.halted;
+      emergencyButton.dataset.halted=String(halted);
+      emergencyButton.textContent=halted ? '▶' : '■';
+      emergencyButton.setAttribute('aria-label',halted ?
+        (emergency.canResume ? 'RESUME previous modules (Ctrl+Shift+X)' : 'Stopped: reload lost resume snapshot; use Quick Hunt') :
+        'EMERGENCY STOP (Ctrl+Shift+X)');
+      emergencyButton.title=halted ? (emergency.canResume ? 'RESUME ONLY previously active modules · Ctrl+Shift+X' :
+        'Manual restart needed; snapshot not available after reload') : 'STOP ALL · Ctrl+Shift+X · Drag to reposition';
     }
     function triggerEmergencyStop() {
-      bot.emergencyStop?.();
+      if (bot.emergencyState?.().halted) {
+        if (!bot.emergencyResume?.()) console.warn('[minibia-bot] emergency resume incomplete/unavailable');
+      } else bot.emergencyStop?.();
       refreshEmergencyButton();
     }
     const emergencyDiameter = 44;
@@ -9873,69 +9983,109 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
       emergencyButton.remove();
     });
 
-    const quickRoute = quickBar.querySelector("#minibia-bot-quick-route");
-    const quickStart = quickBar.querySelector("#minibia-bot-quick-start");
-    const quickStop = quickBar.querySelector("#minibia-bot-quick-stop");
-    const quickPrioritize = quickBar.querySelector("#minibia-bot-quick-prioritize");
-    const quickStatus = quickBar.querySelector("#minibia-bot-quick-status");
-    const quickSummary = quickBar.querySelector("#minibia-bot-quick-summary");
+    const quickRoute = quickBar.querySelector('#minibia-bot-quick-route');
+    const quickStart = quickBar.querySelector('#minibia-bot-quick-start');
+    const quickStop = quickBar.querySelector('#minibia-bot-quick-stop');
+    const quickStatus = quickBar.querySelector('#minibia-bot-quick-status');
+    const quickSummary = quickBar.querySelector('#minibia-bot-quick-summary');
+    const quickControls={
+      attack:quickBar.querySelector('#minibia-bot-quick-attack'),
+      melee:quickBar.querySelector('#minibia-bot-quick-melee'),
+      stairs:quickBar.querySelector('#minibia-bot-quick-stairs'),
+      prioritize:quickBar.querySelector('#minibia-bot-quick-prioritize'),
+      leash:quickBar.querySelector('#minibia-bot-quick-leash'),
+      heal:quickBar.querySelector('#minibia-bot-quick-heal'),
+      talk:quickBar.querySelector('#minibia-bot-quick-talk'),
+      chase:quickBar.querySelector('#minibia-bot-quick-chase'),
+    };
     function refreshQuickSummary() {
-      const attack = bot.attack?.status?.();
-      const c = attack?.config || bot.attack?.config || {};
-      const heal = bot.heal?.status?.();
-      const healLabel = heal?.running ? "Heal ON" : "Heal OFF (unchanged)";
-      const melee = c.meleeMode === true;
-      const chase = c.chaseController === "pathfinder" ? "Bot pathfinding" :
-        c.chaseController === "native" ? "Native" : "Hybrid";
-      const stairs = c.avoidFloorChangesOnChase !== false ? "strict stairs ON" : "strict stairs OFF";
-      quickSummary.textContent = `START HUNT = selected route + Auto Attack + ${quickPrioritize.checked ? "monster priority ON" : "monster priority OFF"}. ` +
-        `Melee ${melee ? "ON" : "OFF"} · ${chase} · ${stairs} · ${healLabel}. ` +
-        `Does not change Melee, Chase or Heal settings.`;
+      const a=bot.attack?.status?.(),c=bot.cave?.status?.(),h=bot.heal?.status?.(),t=bot.talk?.status?.();
+      const attackConfig=a?.config||{},caveConfig=c?.config||{};
+      quickControls.attack.checked=!!a?.running;
+      quickControls.melee.checked=attackConfig.meleeMode===true;
+      quickControls.stairs.checked=attackConfig.avoidFloorChangesOnChase!==false;
+      quickControls.prioritize.checked=caveConfig.prioritizeMonsters===true;
+      quickControls.leash.checked=caveConfig.limitChaseToRoute===true;
+      quickControls.heal.checked=!!h?.running;
+      quickControls.talk.checked=!!t?.running && t?.config?.replyMode==='gemini';
+      quickControls.chase.value=attackConfig.chaseController||'hybrid';
+      quickControls.chase.disabled=attackConfig.meleeMode===false;
+      // Keep advanced inputs mirrored; never maintain a separate quick preset.
+      const mirror=(id,value)=>{const input=panel.querySelector('#'+id);if(input && document.activeElement!==input){
+        if(input.type==='checkbox') input.checked=!!value; else input.value=String(value);
+      }};
+      mirror('minibia-bot-auto-attack-enabled',!!a?.running);
+      mirror('minibia-bot-auto-attack-melee',attackConfig.meleeMode===true);
+      mirror('minibia-bot-auto-attack-avoid-stairs',attackConfig.avoidFloorChangesOnChase!==false);
+      mirror('minibia-bot-auto-attack-chase-controller',attackConfig.chaseController||'hybrid');
+      mirror('minibia-bot-cave-prioritize-monsters',caveConfig.prioritizeMonsters===true);
+      mirror('minibia-bot-cave-limit-chase',caveConfig.limitChaseToRoute===true);
+      mirror('minibia-bot-auto-heal-enabled',!!h?.running);
+      mirror('minibia-bot-talk-enabled',!!t?.running);
+      mirror('minibia-bot-talk-mode',t?.config?.replyMode||'rules');
+      const chaseAdvanced=panel.querySelector('#minibia-bot-auto-attack-chase-controller');
+      if(chaseAdvanced) chaseAdvanced.disabled=attackConfig.meleeMode===false;
+      quickSummary.textContent=`Attack ${a?.running?'ON':'OFF'} · Melee ${attackConfig.meleeMode?'ON':'OFF'} · `+
+        `Chase ${attackConfig.chaseController||'hybrid'} · Stair guard ${attackConfig.avoidFloorChangesOnChase!==false?'ON':'OFF'} · `+
+        `Heal ${h?.running?'ON':'OFF'} · Gemini ${quickControls.talk.checked?'ON':'OFF'} · `+
+        `Floor changes ${caveConfig.allowFloorTransitions?'allowed':'blocked'} · `+
+        `Priority ${caveConfig.prioritizeMonsters?'ON':'OFF'}. All advanced controls share these states.`;
     }
     function refreshQuickRoutes() {
-      const names = bot.cave?.getPresetNames?.() || [];
-      const selected = quickRoute.value || bot.storage.get("minibiaBot.quick.route", "") || bot.cave?.getActivePresetName?.();
-      if (quickRoute.options.length !== names.length || names.some((n,i) => quickRoute.options[i]?.value !== n)) {
+      const names=bot.cave?.getPresetNames?.()||[];
+      const selected=quickRoute.value||bot.storage.get('minibiaBot.quick.route','')||bot.cave?.getActivePresetName?.();
+      if(quickRoute.options.length!==names.length||names.some((n,i)=>quickRoute.options[i]?.value!==n)) {
         quickRoute.replaceChildren();
-        for (const name of names) {
-          const option = document.createElement("option"); option.value=name; option.textContent=name; quickRoute.append(option);
-        }
-        if (names.includes(selected)) quickRoute.value = selected;
+        for(const name of names){const option=document.createElement('option');option.value=name;option.textContent=name;quickRoute.append(option);}
+        if(names.includes(selected)) quickRoute.value=selected;
       }
-      quickStart.disabled = !names.length;
-      quickStatus.textContent = bot.cave?.status?.()?.running ? "Hunt active" : "Hunt stopped (manual control)";
+      quickStart.disabled=!names.length;
+      const em=bot.emergencyState?.();
+      quickStatus.textContent=em?.halted ? (em.canResume ? 'Emergency paused. Use ▶ to resume previous modules.' : 'Emergency paused; reload cleared resume snapshot.') :
+        (bot.cave?.status?.()?.running ? 'Hunt active' : 'Hunt stopped; quick toggles can still control other modules');
       refreshQuickSummary();
     }
-    quickRoute.addEventListener("change", () => bot.storage.set("minibiaBot.quick.route", quickRoute.value));
-    quickPrioritize.checked = bot.storage.get("minibiaBot.quick.prioritize", true) !== false;
-    quickPrioritize.addEventListener("change", () => {
-      bot.storage.set("minibiaBot.quick.prioritize", quickPrioritize.checked);
-      bot.cave?.updateConfig?.({prioritizeMonsters: quickPrioritize.checked});
+    quickRoute.addEventListener('change',()=>bot.storage.set('minibiaBot.quick.route',quickRoute.value));
+    function quickControl(id,callback){quickControls[id].addEventListener('change',()=>{
+      if(bot.emergencyState?.().halted) bot.emergencyDismiss?.();
+      callback(quickControls[id].type==='checkbox'?quickControls[id].checked:quickControls[id].value);
+      refreshQuickSummary();
+    });}
+    quickControl('attack',(on)=>on?bot.attack.start():bot.attack.stop());
+    quickControl('melee',(on)=>bot.attack.updateConfig({meleeMode:on}));
+    quickControl('stairs',(on)=>bot.attack.updateConfig({avoidFloorChangesOnChase:on}));
+    quickControl('prioritize',(on)=>bot.cave.updateConfig({prioritizeMonsters:on}));
+    quickControl('leash',(on)=>bot.cave.updateConfig({limitChaseToRoute:on}));
+    quickControl('heal',(on)=>on?bot.heal.start():bot.heal.stop());
+    quickControl('chase',(value)=>bot.attack.updateConfig({chaseController:value}));
+    quickControl('talk',(on)=>{
+      if(on){bot.talk.updateConfig({replyMode:'gemini'});if(!bot.talk.status().running) {
+        if(!bot.talk.start()) quickStatus.textContent='Gemini could not start; check API key in Talk';
+      }}else if(bot.talk.status().config.replyMode==='gemini') bot.talk.stop();
+      refreshTalkStatus();
+    });
+    quickStart.addEventListener('click',()=>{
+      const name=quickRoute.value;
+      if(!name||!bot.cave?.loadPreset?.(name)){quickStatus.textContent='Could not load selected route';return;}
+      bot.storage.set('minibiaBot.quick.route',name);
+      bot.emergencyDismiss?.();
+      const ok=bot.cave?.status?.()?.running || bot.cave?.start?.();
+      quickStatus.textContent=ok ? 'Hunt started: '+name : 'Could not start Cave Bot';
       refreshQuickSummary();
     });
-    quickStart.addEventListener("click", () => {
-      const name = quickRoute.value;
-      if (!name || !bot.cave?.loadPreset?.(name)) {
-        quickStatus.textContent = "Could not load selected route"; return;
-      }
-      bot.storage.set("minibiaBot.quick.route", name);
-      bot.storage.set("minibiaBot.emergencyStop", false);
-      bot.cave.updateConfig({ prioritizeMonsters: quickPrioritize.checked });
-      const wasAttacking = bot.attack?.status?.()?.running;
-      if (!wasAttacking) bot.attack?.start?.();
-      if (!bot.cave?.start?.()) {
-        if (!wasAttacking) bot.attack?.stop?.();
-        quickStatus.textContent = "Failed to start Cave Bot"; return;
-      }
-      quickStatus.textContent = "Hunt started: " + name;
+    quickStop.addEventListener('click',()=>{
+      bot.cave?.stop?.();bot.attack?.stop?.();
+      quickStatus.textContent='Hunt stopped; other utilities still active';refreshQuickSummary();
     });
-    quickStop.addEventListener("click", () => {
-      bot.cave?.stop?.(); bot.attack?.stop?.();
-      quickStatus.textContent = "Hunt stopped; other utilities still active";
+    // A deliberate advanced control change supersedes any pending resume snapshot.
+    panel.addEventListener('change',(event)=>{
+      if(bot.emergencyState?.().halted && event.target !== quickRoute &&
+          !quickBar.contains(event.target)) bot.emergencyDismiss?.();
     });
     refreshQuickRoutes();
-    const quickRefreshTimer = window.setInterval(refreshQuickRoutes, 1800);
-    bot.addCleanup(() => window.clearInterval(quickRefreshTimer));
+    // One source of truth: advanced panel events change modules; this reads those modules.
+    const quickRefreshTimer=window.setInterval(refreshQuickRoutes,800);
+    bot.addCleanup(()=>window.clearInterval(quickRefreshTimer));
 
     const unlockAudio = () => {
       bot.unlockAudio?.();
@@ -10252,6 +10402,11 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
       });
     }
 
+    const caveAllowFloorsInput=panel.querySelector('#minibia-bot-cave-allow-floors');
+    if(caveAllowFloorsInput) {
+      caveAllowFloorsInput.checked=bot.cave?.config?.allowFloorTransitions===true;
+      caveAllowFloorsInput.addEventListener('change',()=>bot.cave?.updateConfig?.({allowFloorTransitions:caveAllowFloorsInput.checked}));
+    }
     if (caveToolsInput) {
       caveToolsInput.checked = bot.cave?.config?.useWaypointTools !== false;
       caveToolsInput.addEventListener("change", () => bot.cave?.updateConfig?.({ useWaypointTools: caveToolsInput.checked }));
@@ -10963,6 +11118,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     currentBundle.installHealModule(bot);
     currentBundle.installAutoInvisibleModule(bot);
     currentBundle.installAutoMagicShieldModule(bot);
+    currentBundle.installSafeNavigationModule(bot);
     currentBundle.installAutoAttackModule(bot);
     currentBundle.installCaveModule(bot);
     currentBundle.installEquipRingModule(bot);
@@ -10973,30 +11129,77 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     currentBundle.installAutoSellModule(bot);
     currentBundle.installPanel(bot);
 
-    // Emergency stop: never restarts itself or clears recorded waypoints.
-    // Cave must stop first: stopping an active seller trip may restart attack.
+    // Reversible emergency latch. Snapshot exists only in this running tab:
+    // reloading must NEVER silently re-enable stopped automation.
+    let emergencySnapshot = null;
+    const resumableModules = ["heal", "rune", "eat", "invisible", "magicShield",
+      "equipRing", "talk", "floorMove", "corpseLoot", "attack", "cave", "panic"];
+    bot.emergencyState = () => ({halted:!!bot.storage.get('minibiaBot.emergencyStop',false),
+      canResume:emergencySnapshot!==null,
+      previous: emergencySnapshot ? {...emergencySnapshot.modules} : null});
     bot.emergencyStop = function emergencyStop() {
+      if (emergencySnapshot !== null) return false;
+      const modules = {};
+      for (const key of resumableModules) {
+        try {modules[key]=bot[key]?.status?.()?.running === true;} catch (_) {modules[key]=false;}
+      }
+      emergencySnapshot = {
+        modules,
+        autoSellEnabled: bot.autoSell?.status?.()?.config?.enabled === true,
+        overlayEnabled: bot.xray?.status?.()?.config?.overlayEnabled === true,
+      };
+      bot.storage.set('minibiaBot.emergencyStop',true);
       try {
-        bot.storage.set("minibiaBot.emergencyStop", true);
-        bot.autoSell?.updateConfig?.({enabled:false});
-        bot.autoSell?.reset?.();
-        bot.corpseLoot?.stop?.("Emergency stop");
+        bot.autoSell?.updateConfig?.({enabled:false});bot.autoSell?.reset?.();
+        bot.corpseLoot?.stop?.('Emergency stop');
         bot.cave?.stop?.();
         bot.attack?.stop?.();
-        for (const key of ["rune", "heal", "eat", "invisible", "magicShield", "equipRing", "talk", "floorMove"]) {
-          try { bot[key]?.stop?.(); } catch(error) { bot.log("emergency stop " + key, error?.message || error); }
+        for (const key of ['rune','heal','eat','invisible','magicShield','equipRing','talk','floorMove','panic']) {
+          try {bot[key]?.stop?.();} catch(error) {bot.log('emergency stop '+key,error?.message||error);}
         }
-        bot.panic?.stop?.();
+        bot.safeNavigation?.cancel?.('attack');bot.safeNavigation?.cancel?.('cave');
         bot.xray?.setOverlayEnabled?.(false);
-        const client = window.gameClient;
-        // Emergency only: clear even native chase, unlike the normal STOP HUNT.
-        try { client?.interface?.fightModeSelector?.setChaseMode?.(0); } catch(e) { /* no native chase on this client */ }
-        try { client?.world?.pathfinder?.setPathfindCache?.(null); } catch(e) { /* no walk cache */ }
-        try { if (typeof StopWalkPacket === "function") client?.send?.(new StopWalkPacket()); } catch(e) { /* no stop packet */ }
-        bot.log("EMERGENCY STOP engaged: all bot automation halted");
-      } catch (error) {
-        console.error("[minibia-bot] emergency stop failure", error);
+        const client=window.gameClient;
+        try {client?.interface?.fightModeSelector?.setChaseMode?.(0);} catch (_) {}
+        try {client?.world?.pathfinder?.setPathfindCache?.(null);} catch (_) {}
+        try {if(typeof StopWalkPacket==='function')client?.send?.(new StopWalkPacket());} catch (_) {}
+        bot.log('EMERGENCY STOP: configuration saved for manual resume');
+      } catch(error) {console.error('[minibia-bot] emergency stop failure',error);}
+      return true;
+    };
+    bot.emergencyDismiss = function emergencyDismiss() {
+      emergencySnapshot=null;
+      bot.storage.set("minibiaBot.emergencyStop",false);
+      return true;
+    };
+    bot.emergencyResume = function emergencyResume() {
+      if (!emergencySnapshot) {
+        bot.log('cannot resume: no snapshot in this session; use Quick Hunt');
+        return false;
       }
+      const saved=emergencySnapshot;
+      // Cave last: restart defense/combat before restoring waypoint movement.
+      const order=['heal','rune','eat','invisible','magicShield','equipRing',
+        'talk','floorMove','corpseLoot','attack','panic','cave'];
+      const failed=[];
+      for(const key of order) {
+        if(!saved.modules[key]) continue;
+        try {
+          if(bot[key]?.status?.()?.running===true) continue;
+          if (key==='corpseLoot') bot.corpseLoot?.updateConfig?.({enabled:true});
+          else if (bot[key]?.start?.()===false) {failed.push(key);continue;}
+          if(bot[key]?.status?.()?.running!==true) failed.push(key);
+        }catch(error){failed.push(key);bot.log('emergency resume '+key,error?.message||error);}
+      }
+      if(saved.autoSellEnabled) try {bot.autoSell?.updateConfig?.({enabled:true});} catch (_) {failed.push('autoSell');}
+      if(saved.overlayEnabled) try {bot.xray?.setOverlayEnabled?.(true);} catch (_) {failed.push('xray');}
+      if(failed.length) {
+        bot.log('partial emergency restore; retry or check modules',failed);
+        return false;
+      }
+      emergencySnapshot=null;
+      bot.storage.set('minibiaBot.emergencyStop',false);
+      bot.log('EMERGENCY RESUME: previously running modules restored');
       return true;
     };
     bot.ui.inject();
@@ -11023,6 +11226,8 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
       floorMove: bot.floorMove.status(),
       corpseLoot: bot.corpseLoot.status(),
       autoSell: bot.autoSell.status(),
+      emergency: bot.emergencyState(),
+      navigation: bot.safeNavigation.status(),
     });
 
     window.minibiaBot = bot;

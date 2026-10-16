@@ -30,6 +30,7 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     lastObservedPosition: null,
     pendingTransitionSource: null,
     pausedForCombat: false,
+    expectedFloor: null,
     pausedForFloorMove: false,
     lastWaypointWalkDestinationKey: null,
     lastPriorityMonsterSeenAt: 0,
@@ -60,6 +61,7 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
       repathMs: 1500,
       autoRecoverWaypoints: true,
       waypointTolerance: 0,
+      allowFloorTransitions: false, // explicit opt-in for intentional cross-floor waypoints
       prioritizeMonsters: false, // opt-in: pause waypoint navigation during fights
       limitChaseToRoute: false, // opt-in: do not chase mobs outside recorded route area
       maxChaseFromRouteTiles: 6,
@@ -78,6 +80,7 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     bot.storage.get(configStorageKey, {})
   );
   config.tickMs = 500;
+  config.allowFloorTransitions = config.allowFloorTransitions === true;
   config.prioritizeMonsters = config.prioritizeMonsters === true;
   config.autoRecoverWaypoints = config.autoRecoverWaypoints !== false;
   config.limitChaseToRoute = config.limitChaseToRoute === true;
@@ -1059,51 +1062,30 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
   }
 
   function goToWaypoint(waypoint) {
-    const from = bot.getPlayerPosition();
-    const pf = window.gameClient?.world?.pathfinder;
-    if (!from || !waypoint || typeof Position !== "function" ||
-        typeof pf?.findPath !== "function") return false;
-
+    const from = normalizePosition(bot.getPlayerPosition());
+    if (!from || !waypoint || !bot.safeNavigation?.go) return false;
     const now = Date.now();
-    const requestedKey = getPositionKey(waypoint);
-    const activeKey = getPositionKey(normalizePosition(pf.__finalDestination));
-    const walkingToRequested = activeKey === requestedKey &&
-      state.lastWaypointWalkDestinationKey === requestedKey &&
-      pf.__isAutoWalking !== false;
-
-    // The previous bot called findPath every 1.5s, even during a healthy
-    // autowalk. Minibia's findPath sends StopWalkPacket for that case.
-    // Keep an active walk unless position has stopped changing for 4s.
-    if (walkingToRequested && now - state.lastProgressAt < 4000) return true;
-    if (walkingToRequested && typeof pf.setPathfindCache === "function") {
-      cancelOwnWaypointWalk(); // cancel ONLY our old stuck autowalk
-    }
-    state.lastPathAt = now;
-    const to = new Position(waypoint.x, waypoint.y, waypoint.z);
-    try {
-      pf.findPath(from, to);
-      const startedKey = getPositionKey(normalizePosition(pf.__finalDestination));
-      if (startedKey !== requestedKey) {
-        state.lastWaypointWalkDestinationKey = null;
-        state.lastRoutePathError = "pathfinder did not accept waypoint destination";
-        state.lastRoutePathErrorAt = now;
-        if (now - state.lastRouteRecoveryWarningAt >= 8000) {
-          state.lastRouteRecoveryWarningAt = now;
-          bot.log("cave path unavailable; will retry without skipping waypoint", {
-            waypoint, index: state.currentIndex + 1,
-          });
-        }
-        return false;
+    const pf = window.gameClient?.world?.pathfinder;
+    // Continue a healthy, verified route segment; never spam StopWalkPacket.
+    if (bot.safeNavigation.owns('cave') && pf?.__isAutoWalking &&
+        now-state.lastProgressAt<3500) return true;
+    if (now-state.lastPathAt<800) return false;
+    if (bot.safeNavigation.owns('cave')) bot.safeNavigation.cancel('cave');
+    state.lastPathAt=now;
+    const result = bot.safeNavigation.go('cave',waypoint,{maxSteps:10});
+    if (!result.ok) {
+      state.lastRoutePathError=result.reason;
+      state.lastRoutePathErrorAt=now;
+      if (now-state.lastRouteRecoveryWarningAt>=8000) {
+        state.lastRouteRecoveryWarningAt=now;
+        bot.log('cave blocked unsafe/unavailable path; waypoint unchanged',
+          {waypoint,index:state.currentIndex+1,reason:result.reason});
       }
-      state.lastRoutePathError = null;
-      state.lastWaypointWalkDestinationKey = requestedKey;
-      return true;
-    } catch (error) {
-      state.lastRoutePathError = String(error?.message || error);
-      state.lastRoutePathErrorAt = now;
-      bot.log("cave pathing failed", { ...waypoint, error: state.lastRoutePathError });
       return false;
     }
+    state.lastWaypointWalkDestinationKey=getPositionKey(result.destination);
+    state.lastRoutePathError=null;
+    return true;
   }
 
   function goToPosition(position) {
@@ -1363,7 +1345,31 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     }
 
     if (!isSameTile(position, targetPosition)) {
-      return goToPosition(targetPosition);
+      // Deliberate cross-floor waypoint only: approach safely, then step on
+      // the actual transition with ONE explicit direction (never mapclick).
+      if (!config.allowFloorTransitions || waypoint?.z === position.z) return false;
+      if (!isAdjacentTile(position, targetPosition)) {
+        const adjacent=findAdjacentWalkablePosition(targetPosition,position);
+        return adjacent ? goToPosition(adjacent) : false;
+      }
+      const pf=window.gameClient?.world?.pathfinder;
+      if (pf?.__isAutoWalking && !bot.safeNavigation?.owns?.('cave')) return false;
+      const fromTile=getTileAt(position);
+      if (!fromTile?.__position || typeof fromTile.__position.getLookDirection!=="function" ||
+          typeof AutoWalkPacket!=="function" || !pf) return false;
+      bot.safeNavigation?.cancel?.('cave');
+      const direction=fromTile.__position.getLookDirection(targetTile.__position);
+      const client=window.gameClient;
+      // The only unchecked destination is the exact, chosen floorchange tile.
+      pf.__finalDestination=new Position(targetPosition.x,targetPosition.y,targetPosition.z);
+      pf.__minimapWaypoints=null;
+      pf.__pathfindCache=[];
+      pf.__isAutoWalking=true;
+      pf.__autoWalkStepsRemaining=1;
+      client.send(new AutoWalkPacket([direction]));
+      state.lastStairsUseAt=now;
+      markPendingTransitionSource(targetPosition);
+      return true;
     }
 
     const currentTile = getTileAt(position);
@@ -1383,6 +1389,7 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
   }
 
   function handleFloorChange(waypoint, now = Date.now()) {
+    if (!config.allowFloorTransitions) return false;
     const position = normalizePosition(bot.getPlayerPosition());
     if (!position || !waypoint || position.z === waypoint.z) {
       return false;
@@ -1463,17 +1470,12 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
   // cancel it only when the active destination matches the last waypoint
   // navigation request. Never cancel a melee chase or manual movement.
   function cancelOwnWaypointWalk() {
-    const pathfinder = window.gameClient?.world?.pathfinder;
-    const activeDestinationKey = getPositionKey(normalizePosition(pathfinder?.__finalDestination));
-    if (!activeDestinationKey || !state.lastWaypointWalkDestinationKey ||
-        activeDestinationKey !== state.lastWaypointWalkDestinationKey ||
-        typeof pathfinder?.setPathfindCache !== "function") {
-      return false;
+    const cancelled=bot.safeNavigation?.cancel?.('cave') === true;
+    if (cancelled) {
+      state.lastWaypointWalkDestinationKey=null;
+      state.lastPathAt=0;
     }
-    pathfinder.setPathfindCache(null);
-    state.lastWaypointWalkDestinationKey = null;
-    state.lastPathAt = 0;
-    return true;
+    return cancelled;
   }
 
   // The floor-item mover may temporarily own movement to a visible item.
@@ -1777,6 +1779,11 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     }
     // Reuse the same learned stair/hole handling as intentional Cave Bot routes.
     if (destination?.z !== position.z) {
+      if (!config.allowFloorTransitions) {
+        bot.log('seller route blocked: explicit floor transitions are OFF');
+        stop();bot.playAlarm?.();return true;
+      }
+      state.expectedFloor=null;
       handleFloorChange(destination, now);
     } else if (now - state.lastPathAt >= config.repathMs ||
       now - state.lastProgressAt >= config.repathMs) {
@@ -1799,11 +1806,23 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
       const position = normalizePosition(bot.getPlayerPosition());
       const positionKey = getPositionKey(position);
       const now = Date.now();
+      if (config.allowFloorTransitions && state.expectedFloor === null && position) state.expectedFloor=position.z;
       if (positionKey && positionKey !== state.lastPositionKey) {
         state.lastPositionKey = positionKey;
         state.lastProgressAt = now;
       }
 
+      // The server may still teleport the player unexpectedly. Stop instead of
+      // resuming the route on another floor (never auto-recover via stairs).
+      if (!config.allowFloorTransitions && state.expectedFloor !== null &&
+          position && position.z !== state.expectedFloor) {
+        bot.log('UNEXPECTED FLOOR CHANGE: cave and melee stopped',
+          {expected:state.expectedFloor,observed:position.z});
+        bot.attack?.stop?.();
+        stop();
+        bot.playAlarm?.();
+        return;
+      }
       // Pause *only* cave navigation. Auto Attack and Auto Heal remain active.
       if (config.pauseWaypointsOnVerification && state.pausedForVerification) {
         cancelOwnWaypointWalk();
@@ -1910,6 +1929,15 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
       }
 
       if (position && waypoint.z !== position.z) {
+        if (!config.allowFloorTransitions) {
+          state.lastRoutePathError='floor transition blocked (enable intentional transitions explicitly)';
+          state.lastRoutePathErrorAt=now;
+          stop();
+          bot.playAlarm?.();
+          bot.log('cave stopped: waypoint requires a forbidden floor change',waypoint);
+          return;
+        }
+        state.expectedFloor=null; // deliberate transition: no false emergency while changing floors
         handleFloorChange(waypoint, now);
         return;
       }
@@ -1976,6 +2004,7 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     }
     state.lastPathAt = 0;
     state.lastPositionKey = getPositionKey(position);
+    state.expectedFloor = position?.z ?? null;
     state.lastProgressAt = Date.now();
     state.pausedForCombat = false;
     state.lastWaypointWalkDestinationKey = null;
@@ -2009,6 +2038,7 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
       persistConfig();
     }
     state.pausedForCombat = false;
+    state.expectedFloor = null;
     const abandonedSellerTrip = state.sellerTrip;
     cancelOwnWaypointWalk();
     state.sellerTrip = null;
@@ -2131,6 +2161,7 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
       lastProgressAt: state.lastProgressAt,
       pendingTransitionSource: cloneValue(state.pendingTransitionSource),
       pausedForCombat: state.pausedForCombat,
+      expectedFloor: state.expectedFloor,
       pausedForFloorMove: state.pausedForFloorMove,
       pausedForVerification: state.pausedForVerification && config.pauseWaypointsOnVerification,
       lastVerificationNotice: state.lastVerificationNotice,
@@ -2142,6 +2173,7 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
 
   function updateConfig(nextConfig = {}) {
     Object.assign(config, nextConfig);
+    config.allowFloorTransitions = config.allowFloorTransitions === true;
     config.prioritizeMonsters = config.prioritizeMonsters === true;
     config.autoRecoverWaypoints = config.autoRecoverWaypoints !== false;
     config.limitChaseToRoute = config.limitChaseToRoute === true;
