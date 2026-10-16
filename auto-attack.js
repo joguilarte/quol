@@ -24,6 +24,7 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
     lastChasePlayerPositionKey: null,
     lastChasePlayerMovedAt: 0,
     skippedTargetIds: new Map(),
+    movementHolds: new Set(), // Moderator / verification: attack in place, NEVER chase.
   };
 
   const storedConfig = bot.storage.get(configStorageKey, {}) || {};
@@ -347,7 +348,9 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
     // the target first in Stand mode and never begin following automatically.
     // If a native chase was enabled, disarm it BEFORE selecting a new target;
     // otherwise the server could begin following before our next tick.
-    if (config.meleeMode && (config.avoidFloorChangesOnChase || config.chaseController === "pathfinder")) {
+    if (state.movementHolds.size) {
+      if (!disableUnsafeNativeChase()) return false;
+    } else if (config.meleeMode && (config.avoidFloorChangesOnChase || config.chaseController === "pathfinder")) {
       if (!disableUnsafeNativeChase()) return false;
     } else if (config.meleeMode && config.chaseController === "native") {
       ensureNativeChase();
@@ -623,6 +626,7 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
   // The two movement controllers are mutually exclusive.  A client map click
   // in pathfinder mode would otherwise disable the game's Safe Chase.
   function syncMeleeChase(now = Date.now()) {
+    if (state.movementHolds.size) return false;
     if (!config.meleeMode) return false;
 
     const target = getEngagedTarget();
@@ -833,19 +837,36 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
     return clicked;
   }
 
+  function setMovementHold(reason, enabled) {
+    const key = String(reason || 'manual');
+    const had = state.movementHolds.has(key);
+    if (enabled) state.movementHolds.add(key);
+    else state.movementHolds.delete(key);
+    if (enabled) {
+      // Only disengage movement, not the selected attack target or combat module.
+      cancelPreviousMeleeChase();
+      disableUnsafeNativeChase();
+      bot.safeNavigation?.cancel?.('attack');
+      try { if (typeof StopWalkPacket === 'function')
+        window.gameClient?.send?.(new StopWalkPacket()); } catch (_) {}
+    }
+    if (had !== enabled) bot.log('auto attack movement hold', { reason: key, enabled });
+    return state.movementHolds.size > 0;
+  }
+
   function tryAttack() {
     if (!config.enabled) return false;
 
     const now = Date.now();
-    if (enforceRouteLeash(now)) return true;
-    if (resetTargetIfTooFar()) return true;
+    if (!state.movementHolds.size && enforceRouteLeash(now)) return true;
+    if (!state.movementHolds.size && resetTargetIfTooFar()) return true;
 
     syncCombatState(now);
     // Select (or switch) first. This also runs when melee is disabled;
     // it never presses a native "attack nearest" hotkey that could toggle off.
     const selected = triggerAttack(now);
     if (config.meleeMode) {
-      const chased = syncMeleeChase(now);
+      const chased = state.movementHolds.size ? false : syncMeleeChase(now);
       return selected || chased;
     }
 
@@ -918,6 +939,8 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
     const combatActive = syncCombatState(Date.now());
     return {
       running: state.running,
+      movementHeld: state.movementHolds.size > 0,
+      movementHoldReasons: Array.from(state.movementHolds),
       config: { ...config },
       lastTargetHotkeyAt: state.lastTargetHotkeyAt,
       lastRuneHotkeyAt: state.lastRuneHotkeyAt,
@@ -986,6 +1009,7 @@ window.__minibiaBotBundle.installAutoAttackModule = function installAutoAttackMo
     stop,
     status,
     updateConfig,
+    setMovementHold,
     tryAttack,
     canAttack,
     triggerAttack,

@@ -250,11 +250,13 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
       if (status?.sellerTrip?.phase === "waiting-at-seller") {
         statusLabel.textContent = "At seller — sell manually; press Confirm Sale & Return";
       } else if (status?.sellerTrip) {
-        statusLabel.textContent = `Seller trip: ${status.sellerTrip.phase} (${status.sellerTrip.index + 1})`;
+        statusLabel.textContent = `${status.sellerTrip.kind==='home'?'HOME travel':'Seller trip'}: ${status.sellerTrip.phase} (${status.sellerTrip.index + 1})`;
       } else if (!route.length) {
         statusLabel.textContent = "Status: no waypoints";
+      } else if (status?.moderatorPaused) {
+        statusLabel.textContent = `GM chat ALARM: ${Math.ceil(status.moderatorPauseRemainingMs/1000)}s — movement stopped, attack stationary, Heal active`;
       } else if (status?.pausedForVerification) {
-        statusLabel.textContent = "Status: paused for verification (Heal/Attack stay active)";
+        statusLabel.textContent = "ALARM: verification notice. Movement and chase stopped; attack in place; resume manually.";
       } else if (status?.running) {
         const waypointNumber = (status.currentIndex ?? 0) + 1;
         const distanceLabel =
@@ -1044,6 +1046,8 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
       @container (max-width: 850px) {
         #minibia-bot-panel .mb-body { display: flex; flex-direction: column; }
         #minibia-bot-panel .mb-body > div { width: 100%; }
+        /* Quick Hunt is always first in the narrow flex layout. */
+        #minibia-bot-panel .mb-quick-bar { order: -3; flex: 0 0 auto; }
         #minibia-bot-panel .mb-cave-column { order: -2; }
         #minibia-bot-panel .mb-side-column { order: -1; }
       }
@@ -1332,11 +1336,18 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
               </div>
               <div class="mb-small-note" id="minibia-bot-cave-closest">Closest start: no waypoints</div>
               <div class="mb-small-note" id="minibia-bot-cave-transition-status">Transitions learned: none</div>
+              <label class="mb-field" for="minibia-bot-cave-entry-count">
+                <span class="mb-field-label">Entry waypoints (once, then hunt loop)</span>
+                <input type="number" id="minibia-bot-cave-entry-count" min="0" step="1" value="0" />
+              </label>
+              <div class="mb-small-note">Record the entry first (including one spot beside the shovel stone), then the hunt. Set how many initial waypoints are entry-only; keep at least 2 hunt waypoints. When already in the hunt area, the entry is skipped.</div>
               <label class="mb-toggle">
                 <input type="checkbox" id="minibia-bot-cave-prioritize-monsters" />
                 <span>Prioritize Monsters</span>
               </label>
               <div class="mb-small-note">When Auto Attack is active, pause waypoints while monsters are in targeting range. Melee Mode is needed to approach distant targets.</div>
+              <label class="mb-toggle"><input type="checkbox" id="minibia-bot-cave-random-movement"/><span>Randomize Movement (hunt waypoints)</span></label>
+              <div class="mb-small-note">Occasional safe one-tile lateral detours, max two extra steps. Never during combat or seller trips. Disabled when floor transitions are allowed. OFF by default.</div>
               <label class="mb-toggle">
                 <input type="checkbox" id="minibia-bot-cave-limit-chase" />
                 <span>Limit Melee Chase to Route</span>
@@ -1377,6 +1388,8 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
                 <button type="button" class="mb-small-button" id="minibia-bot-seller-abort">Abort Trip</button>
               </div>
               <div class="mb-small-note" id="minibia-bot-seller-status">Seller return: off</div>
+              <label class="mb-toggle"><input type="checkbox" id="minibia-bot-cave-moderator-pause"/><span>Sound alarm + hold movement on moderator [GOD]/[GM] (30 seconds)</span></label>
+              <div class="mb-small-note">On a new moderator message: alarm + pause ALL automated walking and chase for 30 seconds. Auto Attack continues stationary (only nearby reachable targets), Auto Heal stays active, then resume previous hunt. Old chat history ignored. Configured GM names also apply. OFF by default.</div>
               <label class="mb-toggle">
                 <input type="checkbox" id="minibia-bot-cave-verification-pause" />
                 <span>Pause waypoints on anti-bot notice</span>
@@ -1389,7 +1402,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
                 <button type="button" class="mb-small-button" id="minibia-bot-cave-test-alarm">Test Loud Alarm</button>
                 <button type="button" class="mb-small-button" id="minibia-bot-cave-resume-verification">Resume Waypoints</button>
               </div>
-              <div class="mb-small-note">Check the toggle to enable notifications. Test audio once with the button. Only waypoints pause: Attack and Heal continue. Notices in chat or visible UI are detected when their text matches.</div>
+              <div class="mb-small-note">Check the toggle to enable notifications. Test audio once with the button. Waypoints and chase pause: Attack continues in place and Heal continues. Resume manually after verification. Detection depends on matching notices in chat/UI.</div>
               <div class="mb-actions mb-actions-inline-two">
                 <button type="button" class="mb-small-button" id="minibia-bot-cave-start">Start</button>
                 <button type="button" class="mb-small-button" id="minibia-bot-cave-stop">Stop</button>
@@ -1445,21 +1458,31 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     quickBar.innerHTML = `
       <div class="mb-quick-head"><strong>QUICK HUNT</strong><span class="mb-quick-hint">One click to start your saved hunt</span></div>
       <label class="mb-quick-route">Hunt route <select id="minibia-bot-quick-route"></select></label>
+      <label class="mb-quick-route">Home route (Hunt WP1 → marked Home) <select id="minibia-bot-quick-home-route"></select></label>
       <div class="mb-quick-settings">
         <label class="mb-toggle"><input id="minibia-bot-quick-attack" type="checkbox"/><span>Auto Attack</span></label>
         <label class="mb-toggle"><input id="minibia-bot-quick-melee" type="checkbox"/><span>Melee Mode</span></label>
         <label class="mb-toggle"><input id="minibia-bot-quick-stairs" type="checkbox"/><span>Strict stair protection</span></label>
         <label class="mb-toggle"><input id="minibia-bot-quick-prioritize" type="checkbox"/><span>Prioritize Monsters</span></label>
+        <label class="mb-toggle"><input id="minibia-bot-quick-random" type="checkbox"/><span>Randomize Movement</span></label>
         <label class="mb-toggle"><input id="minibia-bot-quick-leash" type="checkbox"/><span>Limit chase to route</span></label>
         <label class="mb-toggle"><input id="minibia-bot-quick-heal" type="checkbox"/><span>Auto Heal</span></label>
         <label class="mb-toggle"><input id="minibia-bot-quick-talk" type="checkbox"/><span>Auto Reply (Gemini)</span></label>
+        <label class="mb-toggle"><input id="minibia-bot-quick-moderator" type="checkbox"/><span>GM alert: 30s stand &amp; fight</span></label>
+        <label class="mb-toggle"><input id="minibia-bot-quick-verification" type="checkbox"/><span>Anti-bot notice: alarm &amp; stand (manual resume)</span></label>
+        <label class="mb-toggle"><input id="minibia-bot-quick-travel-fight" type="checkbox"/><span>Fight on GO HOME / GO HUNT (else walk only)</span></label>
         <label class="mb-quick-hint" for="minibia-bot-quick-chase">Chase <select id="minibia-bot-quick-chase"><option value="pathfinder">Bot pathfinding</option><option value="hybrid">Hybrid</option><option value="native">Native</option></select></label>
       </div>
       <div class="mb-quick-summary" id="minibia-bot-quick-summary">Quick toggles control the same settings as advanced panels; START HUNT starts the selected route.</div>
       <div class="mb-quick-actions">
+        <button id="minibia-bot-quick-go-hunt" type="button">GO HUNT</button>
+        <button id="minibia-bot-quick-go-home" type="button">GO HOME</button>
         <button id="minibia-bot-quick-start" type="button">START HUNT</button>
         <button id="minibia-bot-quick-stop" type="button">STOP HUNT</button>
+        <button id="minibia-bot-quick-alarm" type="button">TEST ALARM</button>
+        <button id="minibia-bot-quick-resume-notice" type="button">RESUME AFTER NOTICE</button>
       </div>
+      <div class="mb-small-note">GO HOME requires an explicit route from hunt WP1 to marked Home. GO HUNT uses the reverse route. GM / notice alarm holds movement, keeps stationary attack &amp; Auto Heal. Travel fight works only when Auto Attack was already running.</div>
       <div class="mb-small-note" id="minibia-bot-quick-status">Stopped. Toggles apply immediately; START HUNT starts Cave Bot.</div>`;
     panel.querySelector(".mb-body")?.prepend(quickBar);
     function foldSections(columnClass, titleFor) {
@@ -1672,6 +1695,11 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     });
 
     const quickRoute = quickBar.querySelector('#minibia-bot-quick-route');
+    const quickHomeRoute = quickBar.querySelector('#minibia-bot-quick-home-route');
+    const quickGoHunt = quickBar.querySelector('#minibia-bot-quick-go-hunt');
+    const quickGoHome = quickBar.querySelector('#minibia-bot-quick-go-home');
+    const quickAlarm = quickBar.querySelector('#minibia-bot-quick-alarm');
+    const quickResumeNotice = quickBar.querySelector('#minibia-bot-quick-resume-notice');
     const quickStart = quickBar.querySelector('#minibia-bot-quick-start');
     const quickStop = quickBar.querySelector('#minibia-bot-quick-stop');
     const quickStatus = quickBar.querySelector('#minibia-bot-quick-status');
@@ -1681,9 +1709,13 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
       melee:quickBar.querySelector('#minibia-bot-quick-melee'),
       stairs:quickBar.querySelector('#minibia-bot-quick-stairs'),
       prioritize:quickBar.querySelector('#minibia-bot-quick-prioritize'),
+      random:quickBar.querySelector('#minibia-bot-quick-random'),
       leash:quickBar.querySelector('#minibia-bot-quick-leash'),
       heal:quickBar.querySelector('#minibia-bot-quick-heal'),
       talk:quickBar.querySelector('#minibia-bot-quick-talk'),
+      moderator:quickBar.querySelector('#minibia-bot-quick-moderator'),
+      verification:quickBar.querySelector('#minibia-bot-quick-verification'),
+      travelFight:quickBar.querySelector('#minibia-bot-quick-travel-fight'),
       chase:quickBar.querySelector('#minibia-bot-quick-chase'),
     };
     function refreshQuickSummary() {
@@ -1693,9 +1725,13 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
       quickControls.melee.checked=attackConfig.meleeMode===true;
       quickControls.stairs.checked=attackConfig.avoidFloorChangesOnChase!==false;
       quickControls.prioritize.checked=caveConfig.prioritizeMonsters===true;
+      quickControls.random.checked=caveConfig.randomizeMovement===true;
       quickControls.leash.checked=caveConfig.limitChaseToRoute===true;
       quickControls.heal.checked=!!h?.running;
       quickControls.talk.checked=!!t?.running && t?.config?.replyMode==='gemini';
+      quickControls.moderator.checked=caveConfig.pauseOnModeratorMessage===true;
+      quickControls.verification.checked=caveConfig.pauseWaypointsOnVerification===true;
+      quickControls.travelFight.checked=caveConfig.travelFight===true;
       quickControls.chase.value=attackConfig.chaseController||'hybrid';
       quickControls.chase.disabled=attackConfig.meleeMode===false;
       // Keep advanced inputs mirrored; never maintain a separate quick preset.
@@ -1707,6 +1743,9 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
       mirror('minibia-bot-auto-attack-avoid-stairs',attackConfig.avoidFloorChangesOnChase!==false);
       mirror('minibia-bot-auto-attack-chase-controller',attackConfig.chaseController||'hybrid');
       mirror('minibia-bot-cave-prioritize-monsters',caveConfig.prioritizeMonsters===true);
+      mirror('minibia-bot-cave-random-movement',caveConfig.randomizeMovement===true);
+      mirror('minibia-bot-cave-moderator-pause',caveConfig.pauseOnModeratorMessage===true);
+      mirror('minibia-bot-cave-verification-pause',caveConfig.pauseWaypointsOnVerification===true);
       mirror('minibia-bot-cave-limit-chase',caveConfig.limitChaseToRoute===true);
       mirror('minibia-bot-auto-heal-enabled',!!h?.running);
       mirror('minibia-bot-talk-enabled',!!t?.running);
@@ -1717,10 +1756,21 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
         `Chase ${attackConfig.chaseController||'hybrid'} · Stair guard ${attackConfig.avoidFloorChangesOnChase!==false?'ON':'OFF'} · `+
         `Heal ${h?.running?'ON':'OFF'} · Gemini ${quickControls.talk.checked?'ON':'OFF'} · `+
         `Floor changes ${caveConfig.allowFloorTransitions?'allowed':'blocked'} · `+
-        `Priority ${caveConfig.prioritizeMonsters?'ON':'OFF'}. All advanced controls share these states.`;
+        `Priority ${caveConfig.prioritizeMonsters?'ON':'OFF'} · `+
+        `Random ${caveConfig.randomizeMovement?'ON':'OFF'} · Entry once ${c?.entryWaypointCount||0} WPs · `+
+        `GM alarm ${caveConfig.pauseOnModeratorMessage?'ON':'OFF'} · Notice alarm ${caveConfig.pauseWaypointsOnVerification?'ON':'OFF'} · `+
+        `Travel fight ${caveConfig.travelFight?'ON':'OFF'} · Home ${c?.homeRouteValid?'ready':'route needed'}. Settings synced.`;
     }
     function refreshQuickRoutes() {
       const names=bot.cave?.getPresetNames?.()||[];
+      const homeSelected=bot.cave?.config?.homePresetName||'';
+      if (quickHomeRoute.options.length!==names.length+1 ||
+          names.some((n,i)=>quickHomeRoute.options[i+1]?.value!==n)) {
+        quickHomeRoute.replaceChildren();
+        const empty=document.createElement('option');empty.value='';empty.textContent='Select home route';quickHomeRoute.append(empty);
+        for(const name of names){const option=document.createElement('option');option.value=name;option.textContent=name;quickHomeRoute.append(option);}
+      }
+      if(document.activeElement!==quickHomeRoute) quickHomeRoute.value=names.includes(homeSelected)?homeSelected:'';
       const selected=quickRoute.value||bot.storage.get('minibiaBot.quick.route','')||bot.cave?.getActivePresetName?.();
       if(quickRoute.options.length!==names.length||names.some((n,i)=>quickRoute.options[i]?.value!==n)) {
         quickRoute.replaceChildren();
@@ -1729,11 +1779,34 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
       }
       quickStart.disabled=!names.length;
       const em=bot.emergencyState?.();
+      const trip=bot.cave?.status?.()?.sellerTrip;
       quickStatus.textContent=em?.halted ? (em.canResume ? 'Emergency paused. Use ▶ to resume previous modules.' : 'Emergency paused; reload cleared resume snapshot.') :
-        (bot.cave?.status?.()?.running ? 'Hunt active' : 'Hunt stopped; quick toggles can still control other modules');
+        (trip?.kind==='home' ? (trip.phase==='waiting-at-home'?'At HOME — choose GO HUNT to return':'Home travel: '+trip.phase) :
+        (bot.cave?.status?.()?.moderatorPaused ? 'GM ALERT: standing still; attack in place; alarm sounded' :
+        bot.cave?.status?.()?.pausedForVerification ? 'NOTICE ALERT: standing still; press RESUME AFTER NOTICE' :
+        (bot.cave?.status?.()?.running ? 'Hunt active' : 'Hunt stopped; quick toggles can still control other modules')));
       refreshQuickSummary();
     }
     quickRoute.addEventListener('change',()=>bot.storage.set('minibiaBot.quick.route',quickRoute.value));
+    quickHomeRoute.addEventListener('change',()=>{
+      bot.cave?.updateConfig?.({homePresetName:quickHomeRoute.value});refreshQuickSummary();
+    });
+    quickGoHome.addEventListener('click',()=>{
+      quickStatus.textContent=bot.cave?.goHome?.() ? 'GO HOME started' :
+        'GO HOME failed: START HUNT first, save/select route from hunt WP1 to marked Home, and check alerts';
+    });
+    quickGoHunt.addEventListener('click',()=>{
+      if(!bot.cave?.status?.()?.running && quickRoute.value)
+        bot.cave?.loadPreset?.(quickRoute.value);
+      quickStatus.textContent=bot.cave?.goToHunt?.() ? 'GO HUNT started' :
+        'GO HUNT failed: need completed GO HOME or stand on marked Home with valid recorded route';
+    });
+    quickAlarm.addEventListener('click',()=>{
+      bot.unlockAudio?.();bot.playAlarm?.();quickStatus.textContent='Alarm test requested (check browser sound)';
+    });
+    quickResumeNotice.addEventListener('click',()=>{
+      bot.cave?.resumeAfterVerification?.();quickStatus.textContent='Verification pause cleared by operator';
+    });
     function quickControl(id,callback){quickControls[id].addEventListener('change',()=>{
       if(bot.emergencyState?.().halted) bot.emergencyDismiss?.();
       callback(quickControls[id].type==='checkbox'?quickControls[id].checked:quickControls[id].value);
@@ -1743,6 +1816,10 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     quickControl('melee',(on)=>bot.attack.updateConfig({meleeMode:on}));
     quickControl('stairs',(on)=>bot.attack.updateConfig({avoidFloorChangesOnChase:on}));
     quickControl('prioritize',(on)=>bot.cave.updateConfig({prioritizeMonsters:on}));
+    quickControl('random',(on)=>bot.cave.updateConfig({randomizeMovement:on}));
+    quickControl('moderator',(on)=>bot.cave.updateConfig({pauseOnModeratorMessage:on}));
+    quickControl('verification',(on)=>bot.cave.updateConfig({pauseWaypointsOnVerification:on}));
+    quickControl('travelFight',(on)=>bot.cave.updateConfig({travelFight:on}));
     quickControl('leash',(on)=>bot.cave.updateConfig({limitChaseToRoute:on}));
     quickControl('heal',(on)=>on?bot.heal.start():bot.heal.stop());
     quickControl('chase',(value)=>bot.attack.updateConfig({chaseController:value}));
@@ -1760,6 +1837,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
       const ok=bot.cave?.status?.()?.running || bot.cave?.start?.();
       quickStatus.textContent=ok ? 'Hunt started: '+name : 'Could not start Cave Bot';
       refreshQuickSummary();
+      refreshEntryCount();
     });
     quickStop.addEventListener('click',()=>{
       bot.cave?.stop?.();bot.attack?.stop?.();
@@ -1889,6 +1967,8 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     const caveToolsInput = panel.querySelector("#minibia-bot-cave-tools");
     const caveLimitChaseInput = panel.querySelector("#minibia-bot-cave-limit-chase");
     const caveMaxChaseInput = panel.querySelector("#minibia-bot-cave-max-chase");
+    const caveEntryCountInput = panel.querySelector("#minibia-bot-cave-entry-count");
+    const caveModeratorPauseInput = panel.querySelector("#minibia-bot-cave-moderator-pause");
     const caveVerificationPauseInput = panel.querySelector("#minibia-bot-cave-verification-pause");
     const caveVerificationTickInput = panel.querySelector("#minibia-bot-cave-verification-tick");
     const caveResumeVerificationButton = panel.querySelector("#minibia-bot-cave-resume-verification");
@@ -2090,6 +2170,14 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
       });
     }
 
+    const caveRandomMovementInput=panel.querySelector('#minibia-bot-cave-random-movement');
+    if(caveRandomMovementInput) {
+      caveRandomMovementInput.checked=bot.cave?.config?.randomizeMovement===true;
+      caveRandomMovementInput.addEventListener('change',()=>{
+        bot.cave?.updateConfig?.({randomizeMovement:caveRandomMovementInput.checked});
+        refreshCaveStatus();
+      });
+    }
     const caveAllowFloorsInput=panel.querySelector('#minibia-bot-cave-allow-floors');
     if(caveAllowFloorsInput) {
       caveAllowFloorsInput.checked=bot.cave?.config?.allowFloorTransitions===true;
@@ -2216,6 +2304,29 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
       if ((bot.cave?.getPresetNames?.() || []).length !== (sellerRouteSelect?.options?.length ?? 1) - 1) refreshSellerRouteOptions();
     }, 1000);
 
+    function refreshEntryCount() {
+      if (!caveEntryCountInput) return;
+      const s = bot.cave?.status?.();
+      caveEntryCountInput.value = String(s?.entryWaypointCount || 0);
+      caveEntryCountInput.max = String(Math.max(0, (s?.route?.length || 0) - 2));
+      caveEntryCountInput.disabled = !!s?.running;
+    }
+    if (caveEntryCountInput) {
+      caveEntryCountInput.addEventListener('change', () => {
+        const result = bot.cave?.setEntryWaypointCount?.(caveEntryCountInput.value);
+        if (!result?.ok) console.warn('[minibia-bot] entry count:', result?.reason);
+        refreshEntryCount();
+        refreshCaveStatus();
+      });
+      refreshEntryCount();
+    }
+    if (caveModeratorPauseInput) {
+      caveModeratorPauseInput.checked = bot.cave?.status?.()?.config?.pauseOnModeratorMessage === true;
+      caveModeratorPauseInput.addEventListener('change', () => {
+        bot.cave.updateConfig({ pauseOnModeratorMessage: caveModeratorPauseInput.checked });
+      });
+    }
+
     if (caveVerificationPauseInput) {
       caveVerificationPauseInput.checked = bot.cave?.config?.pauseWaypointsOnVerification === true;
       caveVerificationPauseInput.addEventListener("change", () => {
@@ -2252,6 +2363,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
         refreshCavePresetControls();
         refreshCaveClosestStatus();
         refreshCaveTransitionStatus();
+        refreshEntryCount();
       });
     }
 
@@ -2262,6 +2374,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
         refreshCaveStatus();
         refreshCaveClosestStatus();
         refreshCaveTransitionStatus();
+        refreshEntryCount();
       });
     }
 
@@ -2272,6 +2385,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
         refreshCaveStatus();
         refreshCaveClosestStatus();
         refreshCaveTransitionStatus();
+        refreshEntryCount();
       });
     }
 
@@ -2282,6 +2396,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
         refreshCaveStatus();
         refreshCaveClosestStatus();
         refreshCaveTransitionStatus();
+        refreshEntryCount();
       });
     }
 
@@ -2299,6 +2414,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
         refreshCaveStatus();
         refreshCaveClosestStatus();
         refreshCaveTransitionStatus();
+        refreshEntryCount();
       });
     }
 

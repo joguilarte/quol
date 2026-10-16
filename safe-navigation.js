@@ -7,7 +7,8 @@ window.__minibiaBotBundle.installSafeNavigationModule = function installSafeNavi
     owner: null, destinationKey: null, requestedKey: null,
     lastError: null, lastErrorAt: 0, lastSentAt: 0,
     lastProgressAt: 0, lastPositionKey: null, lastReleaseReason: null,
-    lastDirections: [], consecutiveStalls: 0
+    lastDirections: [], consecutiveStalls: 0,
+    lastRandomizedAt: 0, randomizedSegments: 0
   };
   const getPos = (value) => {
     const p = value?.__position || value;
@@ -114,6 +115,7 @@ window.__minibiaBotBundle.installSafeNavigationModule = function installSafeNavi
       for (const neighbor of current.tile.neighbours || []) {
         if (!safeEdge(current.tile, neighbor, from.z)) continue;
         const p = getPos(neighbor), k = key(p);
+        if (options.avoidPosition && k === key(getPos(options.avoidPosition))) continue;
         const dx = p.x - at.x, dy = p.y - at.y;
         const heading = `${dx},${dy}`;
         const diagonal = dx !== 0 && dy !== 0;
@@ -133,6 +135,58 @@ window.__minibiaBotBundle.installSafeNavigationModule = function installSafeNavi
       return { ok: false, reason: 'invalidated path' };
     return { ok: true, path, destination: getPos(path[path.length - 1]),
       exact: key(getPos(path[path.length - 1])) === key(to), cost: best.g };
+  }
+
+  // Optional hunt-only variation: plan a short lateral detour from a normal
+  // validated route. Never select transitions, unknown tiles or diagonals that
+  // were not already necessary; always land at the same segment destination.
+  // Critically: this runs ONCE before packet send, not on each 500ms cave tick.
+  function chooseHuntDetour(from, baseline, options) {
+    if (!baseline?.ok || baseline.path.length < 3 ||
+        Date.now() - state.lastRandomizedAt < 12000 || Math.random() >= 0.30) return null;
+    const first = getPos(baseline.path[0]);
+    const sourceTile = getTile(from);
+    if (!first || !sourceTile) return null;
+    const forwardX = first.x - from.x, forwardY = first.y - from.y;
+    // Lateral steps only; no backward motion or extra diagonal steps.
+    if (Math.abs(forwardX) + Math.abs(forwardY) !== 1) return null;
+    const originalPositions = [from, ...baseline.path.map(getPos)].filter(Boolean);
+    const originalDiagonals = baseline.path.reduce((count, tile, i) => {
+      const previous = i ? getPos(baseline.path[i - 1]) : from;
+      const p = getPos(tile);
+      return count + Number(p.x !== previous.x && p.y !== previous.y);
+    }, 0);
+    const choices = [];
+    for (const sideTile of sourceTile.neighbours || []) {
+      if (!safeEdge(sourceTile, sideTile, from.z)) continue;
+      const side = getPos(sideTile);
+      if (manhattan(from, side) !== 1) continue;
+      // Perpendicular to the route's original first step.
+      const dx = side.x - from.x, dy = side.y - from.y;
+      if (dx * forwardX + dy * forwardY !== 0) continue;
+      const suffix = plan(side, baseline.destination, {
+        exactOnly: true,
+        maxSteps: Math.min(28, baseline.path.length + 1),
+        maxNodes: options.maxNodes,
+        avoidPosition: from
+      });
+      if (!suffix.ok) continue;
+      const path = [sideTile, ...suffix.path];
+      if (path.length > baseline.path.length + 2 ||
+          path.length > Math.min(28, (Number(options.maxSteps) || 12) + 2) ||
+          suffix.cost + 10 > baseline.cost + 24 ||
+          path.some(tile => key(getPos(tile)) === key(from))) continue;
+      // Never leave the one-tile corridor around the unmodified safe route.
+      if (path.some(tile => !originalPositions.some(p => chebyshev(p, getPos(tile)) <= 1))) continue;
+      const diagonals = path.reduce((count, tile, i) => {
+        const prev = i ? getPos(path[i - 1]) : from;
+        const p = getPos(tile);
+        return count + Number(p.x !== prev.x && p.y !== prev.y);
+      }, 0);
+      if (diagonals > originalDiagonals) continue;
+      choices.push({ ...baseline, path, cost: suffix.cost + 10, randomized: true });
+    }
+    return choices.length ? choices[Math.floor(Math.random() * choices.length)] : null;
   }
 
   function release(reason) {
@@ -192,6 +246,8 @@ window.__minibiaBotBundle.installSafeNavigationModule = function installSafeNavi
     return true;
   }
   function go(owner, to, options = {}) {
+    // Moderator/verification hold takes precedence over every automated walk.
+    if (bot.attack?.status?.()?.movementHeld) return { ok:false, reason:'alert: movement held' };
     if (owner !== 'attack' && owner !== 'cave') return { ok: false, reason: 'unknown owner' };
     const client = window.gameClient, pf = getPathfinder();
     const player = getPos(bot.getPlayerPosition()), now = Date.now();
@@ -214,9 +270,12 @@ window.__minibiaBotBundle.installSafeNavigationModule = function installSafeNavi
       cancel(owner);
     }
     if (pf.__isAutoWalking) return { ok: false, reason: 'non-bot autowalk active' };
-    const result = plan(player, destination, options);
-    if (!result.ok) { markError(result.reason); return result; }
-    if (!result.path.length) return { ok: true, alreadyThere: true, destination: player };
+    const baseline = plan(player, destination, options);
+    if (!baseline.ok) { markError(baseline.reason); return baseline; }
+    if (!baseline.path.length) return { ok: true, alreadyThere: true, destination: player };
+    // Only Cave Bot opts in. Combat and seller routing keep the original path.
+    const result = owner === 'cave' && options.randomize === true
+      ? chooseHuntDetour(player, baseline, options) || baseline : baseline;
     const directions = [];
     let previous = getTile(player);
     for (const tile of result.path) {
@@ -239,6 +298,7 @@ window.__minibiaBotBundle.installSafeNavigationModule = function installSafeNavi
     state.lastProgressAt = now;
     state.lastPositionKey = key(player);
     state.lastDirections = directions.slice();
+    // Count only successfully transmitted randomized segments.
     try { client.send(new AutoWalkPacket(directions)); }
     catch (error) {
       pf.__isAutoWalking = false;
@@ -247,8 +307,9 @@ window.__minibiaBotBundle.installSafeNavigationModule = function installSafeNavi
       release('packet send failed');
       return { ok: false, reason: state.lastError };
     }
+    if (result.randomized) { state.lastRandomizedAt = now; state.randomizedSegments++; }
     return { ok: true, destination: result.destination, exact: result.exact,
-      steps: directions.length, cost: result.cost };
+      steps: directions.length, cost: result.cost, randomized: result.randomized === true };
   }
   function status() {
     reconcile();

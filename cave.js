@@ -50,6 +50,11 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     combatYieldUntil: 0,
     sellerTrip: null, // transient: not persisted across reload
     sellerTripCooldownUntil: 0,
+    entranceCompleted: false,
+    pausedForModeratorUntil: 0,
+    moderatorLastSender: null,
+    moderatorSeen: new Set(),
+    moderatorScannerTimerId: null,
   };
   const minimapOverlayState = {
     timerId: null,
@@ -63,6 +68,7 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
       waypointTolerance: 0,
       allowFloorTransitions: false, // explicit opt-in for intentional cross-floor waypoints
       prioritizeMonsters: false, // opt-in: pause waypoint navigation during fights
+      randomizeMovement: false, // opt-in: rare locally validated lateral detours between hunt waypoints
       limitChaseToRoute: false, // opt-in: do not chase mobs outside recorded route area
       maxChaseFromRouteTiles: 6,
       autoSellerVisit: false,
@@ -71,9 +77,13 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
       minimumFreeCapacity: 50,
       sellerFightOutbound: false,
       sellerFightReturn: false,
+      homePresetName: "",
+      travelFight: false,
       useWaypointTools: true, // rope and shovel for deliberate waypoint floor changes
       pauseWaypointsOnVerification: false, // opt-in, never pauses auto-attack or auto-heal
       verificationScanTickMs: 500,
+      pauseOnModeratorMessage: false,
+      moderatorPauseMs: 30000,
       enabled: false,
       activePresetName: defaultPresetName,
     },
@@ -82,6 +92,7 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
   config.tickMs = 500;
   config.allowFloorTransitions = config.allowFloorTransitions === true;
   config.prioritizeMonsters = config.prioritizeMonsters === true;
+  config.randomizeMovement = config.randomizeMovement === true;
   config.autoRecoverWaypoints = config.autoRecoverWaypoints !== false;
   config.limitChaseToRoute = config.limitChaseToRoute === true;
   config.maxChaseFromRouteTiles = Math.max(2, Math.min(20, Math.trunc(Number(config.maxChaseFromRouteTiles) || 6)));
@@ -91,9 +102,13 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
   config.minimumFreeCapacity = Math.max(1, Math.min(10000, Number(config.minimumFreeCapacity) || 50));
   config.sellerFightOutbound = config.sellerFightOutbound === true;
   config.sellerFightReturn = config.sellerFightReturn === true;
+  config.homePresetName = String(config.homePresetName || "").trim();
+  config.travelFight = config.travelFight === true;
   config.useWaypointTools = config.useWaypointTools !== false;
   config.pauseWaypointsOnVerification = config.pauseWaypointsOnVerification === true;
   config.verificationScanTickMs = Math.max(200, Math.min(5000, Math.round(Number(config.verificationScanTickMs) || 500)));
+  config.pauseOnModeratorMessage = config.pauseOnModeratorMessage === true;
+  config.moderatorPauseMs = Math.max(20000, Math.min(120000, Number(config.moderatorPauseMs) || 30000));
 
   function normalizePresetName(value) {
     const normalized = String(value || "").trim().replace(/\s+/g, " ");
@@ -118,6 +133,7 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
       name,
       route: normalizeRoute(value.route),
       transitions: normalizeTransitions(value.transitions),
+      entryWaypointCount: Math.max(0, Math.trunc(Number(value.entryWaypointCount) || 0)),
     };
   }
 
@@ -134,6 +150,7 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
 
   let route = normalizeRoute(bot.storage.get(routeStorageKey, []));
   let transitions = normalizeTransitions(bot.storage.get(transitionStorageKey, []));
+  let entryWaypointCount = 0; // initial approach WPs visited once per hunt start
   let presets = normalizePresets(bot.storage.get(presetStorageKey, []));
 
   if (!presets.length && (route.length || transitions.length)) {
@@ -177,6 +194,7 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
         name: preset.name,
         route: preset.route.map((waypoint) => ({ ...waypoint })),
         transitions: preset.transitions.map((transition) => cloneValue(transition)),
+        entryWaypointCount: preset.entryWaypointCount || 0,
       }))
     );
   }
@@ -192,7 +210,7 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     return config.activePresetName;
   }
 
-  function upsertPreset(name, nextRoute = route, nextTransitions = transitions) {
+  function upsertPreset(name, nextRoute = route, nextTransitions = transitions, nextEntryCount = entryWaypointCount) {
     const normalizedName = normalizePresetName(name);
     if (!normalizedName) {
       return null;
@@ -202,6 +220,7 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
       name: normalizedName,
       route: normalizeRoute(nextRoute).map((waypoint) => cloneValue(waypoint)),
       transitions: normalizeTransitions(nextTransitions).map((transition) => cloneValue(transition)),
+      entryWaypointCount: Math.max(0, Math.min(Math.max(0, nextRoute.length - 2), Math.trunc(Number(nextEntryCount) || 0))),
     };
     const existingIndex = presets.findIndex((entry) => entry.name.toLowerCase() === normalizedName.toLowerCase());
 
@@ -228,6 +247,8 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
 
     route = normalizeRoute(preset.route);
     transitions = normalizeTransitions(preset.transitions);
+    entryWaypointCount = Math.max(0, Math.min(Math.max(0, route.length - 2), Number(preset.entryWaypointCount) || 0));
+    state.entranceCompleted = false;
     state.currentIndex = 0;
     state.direction = 1;
     state.pendingTransitionSource = null;
@@ -316,6 +337,19 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     return Array.from(deduped.values());
   }
 
+  function getEntryWaypointCount() { return entryWaypointCount; }
+
+  function setEntryWaypointCount(count) {
+    if (state.running) return { ok: false, reason: "Stop Cave Bot to change the entry section" };
+    const n = Math.trunc(Number(count));
+    if (!Number.isFinite(n) || n < 0 || n > Math.max(0, route.length - 2))
+      return { ok: false, reason: "At least two hunt waypoints must remain" };
+    entryWaypointCount = n;
+    state.entranceCompleted = false;
+    persistActivePreset();
+    return { ok: true, count: n };
+  }
+
   function getRoute() {
     return route.map((waypoint) => cloneValue(waypoint));
   }
@@ -368,7 +402,7 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
       stop();
     }
 
-    const preset = upsertPreset(normalizedName, [], []);
+    const preset = upsertPreset(normalizedName, [], [], 0);
     if (!preset) {
       return null;
     }
@@ -427,6 +461,7 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
       } else {
         route = [];
         transitions = [];
+        entryWaypointCount = 0;
         state.currentIndex = 0;
         state.direction = 1;
         state.pendingTransitionSource = null;
@@ -500,15 +535,16 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
       Number(a.z) === Number(b.z);
   }
 
-  function findClosestWaypointIndex(position) {
+  function findClosestWaypointIndex(position, minimumIndex = 0) {
     if (!position || !route.length) {
       return 0;
     }
 
-    let bestIndex = 0;
+    let bestIndex = Math.min(route.length - 1, minimumIndex);
     let bestDistance = Number.POSITIVE_INFINITY;
 
     route.forEach((waypoint, index) => {
+      if (index < minimumIndex) return;
       const distance = getDistanceToWaypoint(position, waypoint);
       if (!Number.isFinite(distance)) {
         return;
@@ -523,6 +559,43 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     return bestIndex;
   }
 
+  // Rejoin on start using a physically reachable waypoint, not just the
+  // closest Manhattan coordinate. This avoids selecting a waypoint behind a
+  // sealed stone entrance when starting outside the saved hunt route.
+  function findReachableStartWaypointIndex(position) {
+    if (!position || !route.length || !bot.safeNavigation?.plan) {
+      return findClosestWaypointIndex(position);
+    }
+    const candidates = route
+      .map((waypoint, index) => ({ index, waypoint, distance: getDistance(position, waypoint) }))
+      .filter((entry) => Number.isFinite(entry.distance))
+      .sort((a, b) => a.distance - b.distance)
+      .slice(0, 16);
+    for (const entry of candidates) {
+      try {
+        const path = bot.safeNavigation.plan(position, entry.waypoint, {
+          maxSteps: 28, maxNodes: 1200, exactOnly: true
+        });
+        if (path?.ok && path.exact) return entry.index;
+      } catch (_) { /* incomplete client map; use prior selection */ }
+    }
+    return findClosestWaypointIndex(position);
+  }
+
+  function chooseStartIndex(position) {
+    if (entryWaypointCount === 0) return findReachableStartWaypointIndex(position);
+    const first = route[0];
+    const hunt = route.slice(entryWaypointCount);
+    const nearestHunt = hunt.reduce((best, p) => Math.min(best, getDistance(position, p)), Infinity);
+    const entryDist = getDistance(position, first);
+    // Starting already inside the hunting floor/area skips the access leg.
+    const shouldEnter = !!position && position.z === first?.z &&
+      Number.isFinite(entryDist) && (entryDist <= nearestHunt + 2 || !Number.isFinite(nearestHunt));
+    if (shouldEnter) return 0;
+    state.entranceCompleted = true;
+    return findClosestWaypointIndex(position, entryWaypointCount);
+  }
+
   // When combat or an external displacement ends far from the recorded path,
   // re-anchor to the closest same-floor waypoint instead of repeatedly trying
   // to reach a distant waypoint from a previous section of the route.
@@ -533,7 +606,8 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     const current = getCurrentWaypoint();
     if (!current || current.z !== position.z) return false;
     const currentDistance = getDistance(position, current);
-    const closestIndex = findClosestWaypointIndex(position);
+    if (entryWaypointCount > 0 && !state.entranceCompleted) return false;
+    const closestIndex = findClosestWaypointIndex(position, entryWaypointCount);
     const closest = route[closestIndex];
     const closestDistance = getDistance(position, closest);
     if (closestIndex === state.currentIndex || !Number.isFinite(closestDistance) ||
@@ -1019,7 +1093,7 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     return best;
   }
 
-  function findNearbyTransitionTile(position, waypoint) {
+  function findNearbyTransitionTile(position, waypoint, candidateFilter = null) {
     if (!position || !waypoint) {
       return null;
     }
@@ -1030,6 +1104,7 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     let bestScore = Number.POSITIVE_INFINITY;
 
     getNearbyTransitionTiles(position, waypoint, radius).forEach((entry) => {
+      if (candidateFilter && !candidateFilter(entry)) return;
       const playerDistance = getDistance(position, entry.position);
       const tileToWaypointDistance =
         Math.abs(entry.position.x - waypoint.x) + Math.abs(entry.position.y - waypoint.y);
@@ -1072,7 +1147,9 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     if (now-state.lastPathAt<800) return false;
     if (bot.safeNavigation.owns('cave')) bot.safeNavigation.cancel('cave');
     state.lastPathAt=now;
-    const result = bot.safeNavigation.go('cave',waypoint,{maxSteps:10});
+    const randomize = config.randomizeMovement === true && !state.sellerTrip &&
+      !state.pausedForCombat && !config.allowFloorTransitions;
+    const result = bot.safeNavigation.go('cave',waypoint,{maxSteps:10,randomize});
     if (!result.ok) {
       state.lastRoutePathError=result.reason;
       state.lastRoutePathErrorAt=now;
@@ -1137,7 +1214,9 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
 
   function resolveObservedTransitionSource(previousPosition) {
     const pending = normalizePosition(state.pendingTransitionSource);
-    if (pending && pending.z === previousPosition.z) {
+    // Never attribute an unrelated later floor change to a stale shovel/rope use.
+    if (pending && pending.z === previousPosition.z &&
+        Date.now() - Number(state.pendingTransitionSource?.at || 0) <= 5000) {
       return pending;
     }
 
@@ -1266,14 +1345,20 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
       return false;
     }
 
-    if (!isAdjacentTile(playerPosition, targetPosition)) {
+    // A tool may only be used from the target's tile or one adjacent tile.
+    // Previously this fell through and attempted the use even when no adjacent
+    // walkable approach existed, producing false 'shoveled' successes.
+    if (!isBesideOrSameTile(playerPosition, targetPosition)) {
       const adjacentPosition = findAdjacentWalkablePosition(targetPosition, playerPosition);
-      if (adjacentPosition) {
-        return goToPosition(adjacentPosition);
+      if (!adjacentPosition || !bot.safeNavigation?.go) {
+        return false;
       }
+      return goToPosition(adjacentPosition);
     }
 
-    window.gameClient?.mouse?.__handleItemUseWith?.(
+    const useWith = window.gameClient?.mouse?.__handleItemUseWith;
+    if (typeof useWith !== 'function') return false;
+    useWith.call(window.gameClient.mouse,
       { which: tool.which, index: tool.index },
       { which: targetTile, index: 0xFF }
     );
@@ -1395,20 +1480,8 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
       return false;
     }
 
-    const visibleCandidate = findNearbyTransitionTile(position, waypoint);
-    if (visibleCandidate) {
-      const moved = useFloorChangeTile(visibleCandidate, waypoint, now);
-      if (moved) {
-        bot.log("cave probing visible floor-change tile", {
-          tileX: visibleCandidate.position.x,
-          tileY: visibleCandidate.position.y,
-          tileZ: visibleCandidate.position.z,
-          targetZ: waypoint.z,
-        });
-        return true;
-      }
-    }
-
+    // Prefer a recorded transition over a visually nearby staircase. This is
+    // essential when starting the hunt off-route near multiple floor changes.
     const knownTransition = findBestKnownTransition(position, waypoint);
     if (knownTransition) {
       const target = {
@@ -1425,11 +1498,48 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
         return true;
       }
 
-      bot.log("cave learned transition unavailable, falling back to live scan", {
-        from: knownTransition.from,
-        to: knownTransition.to,
-        waypoint,
-      });
+      // Do not substitute a different nearby staircase if the recorded one
+      // cannot be approached; preserve the current floor instead.
+      if (now - state.lastRouteRecoveryWarningAt >= 8000) {
+        state.lastRouteRecoveryWarningAt = now;
+        bot.log("cave recorded transition unavailable; no fallback to other stairs", {
+          from: knownTransition.from,
+          to: knownTransition.to,
+          waypoint,
+        });
+      }
+      return false;
+    }
+    // No learned entrance: permit discovery only right next to the character.
+    // Never cross the map toward an arbitrary visible floor transition.
+    const pending = state.pendingTransitionSource;
+    const visibleCandidate = findNearbyTransitionTile(position, waypoint, (entry) => {
+      const recentlyShoveled = pending &&
+        getPositionKey(pending) === getPositionKey(entry.position) &&
+        now - Number(pending.at || 0) <= 5000;
+      const toolEntrance = config.useWaypointTools && (
+        (waypoint.z > position.z && isShovelTargetTile(entry.tile)) ||
+        (waypoint.z < position.z && isRopeTargetTile(entry.tile))
+      );
+      return toolEntrance || recentlyShoveled;
+    });
+    // Unlearned ladders and stairs remain blocked, even with floor changes ON.
+    // A freshly shoveled hole is allowed only at the exact same target tile.
+    if (visibleCandidate && isBesideOrSameTile(position, visibleCandidate.position)) {
+      const moved = useFloorChangeTile(visibleCandidate, waypoint, now);
+      if (moved) {
+        bot.log("cave using adjacent visible floor-change tile", {
+          tileX: visibleCandidate.position.x,
+          tileY: visibleCandidate.position.y,
+          tileZ: visibleCandidate.position.z,
+          targetZ: waypoint.z,
+        });
+        return true;
+      }
+    }
+    if (now - state.lastRouteRecoveryWarningAt >= 8000) {
+      state.lastRouteRecoveryWarningAt = now;
+      bot.log("cave requires a learned or adjacent transition; no speculative stairs", { waypoint });
     }
     return false;
   }
@@ -1444,16 +1554,22 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     }
 
     let nextIndex = state.currentIndex + state.direction;
+    if (entryWaypointCount > 0 && !state.entranceCompleted && nextIndex >= entryWaypointCount) {
+      state.entranceCompleted = true;
+      state.direction = 1;
+      bot.log("cave entrance completed; looping hunt-only segment", { entryWaypoints: entryWaypointCount });
+    }
+    const cycleStart = entryWaypointCount > 0 && state.entranceCompleted ? entryWaypointCount : 0;
 
     if (nextIndex >= route.length) {
       state.direction = -1;
       nextIndex = route.length - 2;
-    } else if (nextIndex < 0) {
+    } else if (nextIndex < cycleStart) {
       state.direction = 1;
-      nextIndex = 1;
+      nextIndex = cycleStart + 1;
     }
 
-    state.currentIndex = Math.max(0, Math.min(route.length - 1, nextIndex));
+    state.currentIndex = Math.max(cycleStart, Math.min(route.length - 1, nextIndex));
 
     const nextWaypoint = getCurrentWaypoint();
     bot.log("cave advanced waypoint", {
@@ -1542,6 +1658,8 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
       if (state.pausedForVerification) return;
       state.pausedForVerification = true;
       cancelOwnWaypointWalk();
+      bot.attack?.setMovementHold?.('verification', true);
+      bot.safeNavigation?.cancel?.('attack');
       bot.playAlarm?.(); // one alert per verification, if browser audio was unlocked
       bot.log("cave paused for verification notice", { notice: notice.text });
     } catch (error) {
@@ -1559,9 +1677,107 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     state.verificationTimerId = window.setInterval(scanVerificationNotice, config.verificationScanTickMs);
   }
 
+  // Special-status chat sender detector. No color-only guessing: colors are
+  // themes and messages may quote role tags. Use the sender field/prefix only.
+  const moderatorRolePattern = /\[(?:GOD|GM|CM|ADMIN|MODERATOR|MOD)\]/i;
+  function isModeratorSender(sender, role = "") {
+    const text = String(sender || "").trim();
+    const declaredRole = String(role || "").trim();
+    if (moderatorRolePattern.test(text) || moderatorRolePattern.test(`[${declaredRole}]`)) return true;
+    const gmNames = bot.panic?.config?.gameMasterNames || [];
+    return !!text && gmNames.some((name) => String(name || "").trim().toLowerCase() === text.toLowerCase());
+  }
+
+  function isModeratorChatMessage(message) {
+    if (isModeratorSender(message?.sender, message?.role)) return true;
+    const raw = String(message?.rawMessage || "");
+    const prefix = raw.match(/^(?:\d{1,2}:\d{2}\s+)?(.{1,80}?)\s+says:\s+/i)?.[1] || "";
+    return !!prefix && isModeratorSender(prefix);
+  }
+
+  function moderatorChatSnapshot() {
+    const out = [];
+    for (const channel of window.gameClient?.interface?.channelManager?.channels || []) {
+      const entries = channel?.__contents || [];
+      for (let i = Math.max(0, entries.length - 20); i < entries.length; i++) {
+        const entry = entries[i] || {};
+        const raw = String(entry.message || entry.text || "");
+        let sender = String(entry.author || entry.sender || entry.name || "").trim();
+        // Some client versions keep the complete "Name [GOD] says" line.
+        const prefixSender = String(raw.match(/^(?:\d{1,2}:\d{2}\s+)?(.{1,80}?)\s+says:\s+/i)?.[1] || "").trim();
+        if (!sender || (prefixSender && moderatorRolePattern.test(prefixSender))) sender = prefixSender;
+        const role = String(entry.role || entry.rank || entry.senderRole || "");
+        if (!sender && !role) continue;
+        const stamp = String(entry.__time || entry.time || entry.id || "");
+        const key = `${channel?.name || ""}|${stamp}|${i}|${sender}|${raw}`;
+        out.push({ key, sender, role });
+      }
+    }
+    return out;
+  }
+
+  function resetModeratorScanBaseline() {
+    state.moderatorSeen = new Set(moderatorChatSnapshot().map((msg) => msg.key));
+  }
+
+  function scanModeratorChat() {
+    if (!config.pauseOnModeratorMessage) return;
+    try {
+      const messages = moderatorChatSnapshot();
+      for (const msg of messages) {
+        if (state.moderatorSeen.has(msg.key)) continue;
+        state.moderatorSeen.add(msg.key);
+        if (state.moderatorSeen.size > 400) {
+          state.moderatorSeen = new Set(Array.from(state.moderatorSeen).slice(-250));
+        }
+        if (!(state.running || bot.attack?.status?.()?.running) ||
+            !isModeratorSender(msg.sender, msg.role)) continue;
+        const now = Date.now();
+        const alreadyPaused = now < state.pausedForModeratorUntil;
+        state.pausedForModeratorUntil = now + config.moderatorPauseMs;
+        state.moderatorLastSender = msg.sender;
+        if (!alreadyPaused) {
+          cancelOwnWaypointWalk();
+          bot.attack?.setMovementHold?.('moderator', true);
+          bot.safeNavigation?.cancel?.('attack');
+          bot.playAlarm?.();
+          bot.log('cave paused after moderator chat', { sender: msg.sender, seconds: config.moderatorPauseMs/1000 });
+        }
+      }
+      // Also expire movement hold if Cave Bot was not running when GM spoke.
+      if (!state.running && state.pausedForModeratorUntil) processModeratorPause(Date.now());
+    } catch (error) {
+      bot.log('moderator chat scan failed', error?.message || error);
+    }
+  }
+
+  function restartModeratorScanner() {
+    if (state.moderatorScannerTimerId != null) window.clearInterval(state.moderatorScannerTimerId);
+    state.moderatorScannerTimerId = null;
+    resetModeratorScanBaseline(); // Do not trigger on old chat history.
+    if (config.pauseOnModeratorMessage) {
+      state.moderatorScannerTimerId = window.setInterval(scanModeratorChat, 500);
+    }
+  }
+
+  function processModeratorPause(now) {
+    if (!state.pausedForModeratorUntil) return false;
+    if (now < state.pausedForModeratorUntil) {
+      cancelOwnWaypointWalk();
+      return true;
+    }
+    state.pausedForModeratorUntil = 0;
+    bot.attack?.setMovementHold?.('moderator', false);
+    state.lastPathAt = 0;
+    state.needsRouteRejoinCheck = true;
+    bot.log('cave moderator pause ended; previous hunt resumed');
+    return false;
+  }
+
   // Only the operator can resume waypoint movement after inspecting the test.
   // Attack and Heal were never stopped.
   function resumeAfterVerification() {
+    bot.attack?.setMovementHold?.('verification', false);
     // Explicit operator decision: a chat notice can remain in the message
     // history after the challenge has ended. Don't let that old text trap the
     // route permanently; a different/new notice can still pause it again.
@@ -1586,7 +1802,7 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
   // If Auto Sell is OFF or needs attention, wait for operator confirmation.
   function getSellerTripStatus() {
     const trip = state.sellerTrip;
-    return trip ? { phase: trip.phase, index: trip.index,
+    return trip ? { kind: trip.kind || 'seller', phase: trip.phase, index: trip.index,
       sellerPresetName: trip.sellerPresetName, returnPresetName: trip.returnPresetName, attackWasRunning: trip.attackWasRunning,
       combatEnabled: isSellerEscortCombatEnabled(trip),
       sellerWaypoints: trip.sellerRoute.length } : null;
@@ -1594,6 +1810,8 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
 
   function isSellerEscortCombatEnabled(trip) {
     if (!trip || !trip.attackWasRunning) return false;
+    if (trip.kind === 'home') return config.travelFight === true &&
+      trip.phase !== 'waiting-at-home';
     if (trip.phase === "exit-hunt" || trip.phase === "seller-out") {
       return config.sellerFightOutbound === true;
     }
@@ -1673,6 +1891,83 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     return true;
   }
 
+  // The same route engine handles both directions. A home route must be
+  // RECORDED from hunt waypoint #1 to the operator's marked Home tile.
+  // Never guess stairs, teleport between floors, or reuse an arbitrary preset.
+  function getValidatedHomeRoute(logFailure = true) {
+    const preset = getPresetByName(config.homePresetName);
+    const home = normalizePosition(bot.pz?.getHomePz?.());
+    if (!preset || !home || !route.length || preset.route.length < 2 ||
+        !isSameTile(preset.route[0], route[0]) ||
+        !isSameTile(preset.route[preset.route.length - 1], home) ||
+        preset.name.toLowerCase() === getActivePresetName().toLowerCase()) {
+      if (logFailure) bot.log('HOME ROUTE INVALID: save a route from hunt WP1 to the exact marked Home position');
+      return null;
+    }
+    return preset;
+  }
+
+  function goHome() {
+    if (!state.running || state.sellerTrip || state.pausedForModeratorUntil ||
+        state.pausedForVerification) return false;
+    const preset = getValidatedHomeRoute();
+    const pos = normalizePosition(bot.getPlayerPosition());
+    if (!preset || !pos) return false;
+    const attackWasRunning = !!bot.attack?.status?.()?.running;
+    state.sellerTrip = {
+      kind: 'home', phase: 'exit-hunt', index: findClosestWaypointIndex(pos),
+      sellerRoute: preset.route.map(cloneValue),
+      sellerTransitions: preset.transitions.map(cloneValue),
+      returnRoute: null, returnTransitions: [], sellerPresetName: preset.name,
+      attackWasRunning, floorMoveWasRunning: false,
+      lastCombatMode: null, combatPaused: false, lastCombatSeenAt: 0,
+    };
+    cancelOwnWaypointWalk();
+    state.lastPathAt = 0;
+    syncSellerEscortCombat(state.sellerTrip);
+    bot.log('travel HOME started', { route: preset.name, fight: config.travelFight });
+    return true;
+  }
+
+  function goToHunt() {
+    const trip = state.sellerTrip;
+    if (trip) {
+      if (trip.kind !== 'home' || trip.phase !== 'waiting-at-home') return false;
+      trip.phase = 'seller-return';
+      trip.index = trip.sellerRoute.length - 2;
+      trip.lastCombatMode = null;
+      syncSellerEscortCombat(trip);
+      state.lastPathAt = 0;
+      state.lastWaypointWalkDestinationKey = null;
+      bot.log('travel to HUNT started');
+      return true;
+    }
+    // A newly loaded session at Home may start the recorded reverse route.
+    const preset = getValidatedHomeRoute();
+    const pos = normalizePosition(bot.getPlayerPosition());
+    const home = normalizePosition(bot.pz?.getHomePz?.());
+    if (!preset || !pos || !home || !isSameTile(pos, home)) {
+      bot.log('GO HUNT requires standing at marked Home or waiting after GO HOME');
+      return false;
+    }
+    if (state.running) return false;
+    // start() normally issues a waypoint movement immediately. Defer the first
+    // tick until the reverse home route owns the navigation.
+    if (!start({ deferFirstTick: true })) return false;
+    const attackWasRunning = !!bot.attack?.status?.()?.running;
+    state.sellerTrip = {
+      kind: 'home', phase: 'seller-return', index: preset.route.length - 2,
+      sellerRoute: preset.route.map(cloneValue),
+      sellerTransitions: preset.transitions.map(cloneValue),
+      returnRoute: null, returnTransitions: [], sellerPresetName: preset.name,
+      attackWasRunning, floorMoveWasRunning: false,
+      lastCombatMode: null, combatPaused: false, lastCombatSeenAt: 0,
+    };
+    syncSellerEscortCombat(state.sellerTrip);
+    tick();
+    return true;
+  }
+
   function cancelSellerTrip() {
     const trip = state.sellerTrip;
     if (!trip) return false;
@@ -1705,6 +2000,7 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     state.sellerTrip = null;
     state.sellerTripCooldownUntil = Date.now() + 60000;
     state.currentIndex = 0;
+    state.entranceCompleted = false;
     state.direction = 1;
     state.lastWaypointWalkDestinationKey = null;
     state.lastPathAt = 0;
@@ -1722,7 +2018,7 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     }
     if (!trip) return false;
     syncSellerEscortCombat(trip);
-    if (trip.phase === "waiting-at-seller") return true;
+    if (trip.phase === "waiting-at-seller" || trip.phase === 'waiting-at-home') return true;
     if (isSellerEscortCombatEnabled(trip) && bot.attack?.status?.()?.running) {
       const active = !!bot.attack.status().combatActive;
       const monsters = !!bot.attack?.hasPriorityMonsters?.(now);
@@ -1757,9 +2053,11 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
         else trip.index -= 1;
       } else if (trip.phase === "seller-out") {
         if (trip.index === trip.sellerRoute.length - 1) {
-          trip.phase = "waiting-at-seller";
+          trip.phase = trip.kind === 'home' ? 'waiting-at-home' : 'waiting-at-seller';
           syncSellerEscortCombat(trip);
-          bot.log("arrived at seller: optional Auto Sell starts when enabled, otherwise sell manually");
+          bot.log(trip.kind === 'home' ?
+            'HOME reached: stationary until GO HUNT' :
+            'arrived at seller: optional Auto Sell starts when enabled, otherwise sell manually');
           return true;
         }
         trip.index += 1;
@@ -1823,6 +2121,8 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
         bot.playAlarm?.();
         return;
       }
+      // Moderator alert pauses movement ONLY; Auto Attack and Auto Heal keep running.
+      if (processModeratorPause(now)) return;
       // Pause *only* cave navigation. Auto Attack and Auto Heal remain active.
       if (config.pauseWaypointsOnVerification && state.pausedForVerification) {
         cancelOwnWaypointWalk();
@@ -1984,7 +2284,9 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
   }
 
   function start(overrides = {}) {
-    Object.assign(config, overrides, { enabled: true });
+    const deferFirstTick = overrides.deferFirstTick === true;
+    const { deferFirstTick: ignored, ...safeOverrides } = overrides;
+    Object.assign(config, safeOverrides, { enabled: true });
     config.tickMs = 500;
     persistConfig();
 
@@ -2000,7 +2302,8 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
 
     const position = normalizePosition(bot.getPlayerPosition());
     state.running = true;
-    state.currentIndex = findClosestWaypointIndex(position);
+    state.entranceCompleted = false;
+    state.currentIndex = chooseStartIndex(position);
     state.direction = state.currentIndex >= route.length - 1 ? -1 : 1;
     if (route.length <= 1) {
       state.direction = 1;
@@ -2023,7 +2326,7 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
       direction: state.direction,
       waypoint: getCurrentWaypoint(),
     });
-    tick();
+    if (!deferFirstTick) tick();
     return true;
   }
 
@@ -2041,6 +2344,10 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
       persistConfig();
     }
     state.pausedForCombat = false;
+    state.entranceCompleted = false;
+    state.pausedForModeratorUntil = 0;
+    bot.attack?.setMovementHold?.('moderator', false);
+    bot.attack?.setMovementHold?.('verification', false);
     state.expectedFloor = null;
     const abandonedSellerTrip = state.sellerTrip;
     cancelOwnWaypointWalk();
@@ -2079,6 +2386,7 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
 
   function clearWaypoints() {
     route = [];
+    entryWaypointCount = 0;
     state.currentIndex = 0;
     state.direction = 1;
     persistRoute();
@@ -2111,6 +2419,7 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     if (route.length <= 1) {
       state.direction = 1;
     }
+    entryWaypointCount = Math.min(entryWaypointCount, Math.max(0, route.length - 2));
     persistRoute();
     bot.log("cave waypoint removed", removed);
 
@@ -2130,6 +2439,7 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
 
     const nextIndex = Math.max(0, Math.min(route.length - 1, Math.trunc(Number(index) || 0)));
     state.currentIndex = nextIndex;
+    state.entranceCompleted = entryWaypointCount === 0 || nextIndex >= entryWaypointCount;
     state.direction = nextIndex >= route.length - 1 ? -1 : 1;
     if (route.length <= 1) {
       state.direction = 1;
@@ -2149,6 +2459,11 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
       presetNames: getPresetNames(),
       activePresetName: getActivePresetName(),
       currentIndex: state.currentIndex,
+      entryWaypointCount,
+      entranceCompleted: state.entranceCompleted,
+      moderatorPaused: Date.now() < state.pausedForModeratorUntil,
+      moderatorPauseRemainingMs: Math.max(0, state.pausedForModeratorUntil - Date.now()),
+      moderatorLastSender: state.moderatorLastSender,
       direction: state.direction,
       currentWaypoint: cloneValue(waypoint),
       distanceToWaypoint: getDistanceToWaypoint(position, waypoint),
@@ -2163,6 +2478,9 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
       lastPathAt: state.lastPathAt,
       lastProgressAt: state.lastProgressAt,
       pendingTransitionSource: cloneValue(state.pendingTransitionSource),
+      shovelFound: !!findShovelSource(),
+      ropeFound: !!findRopeSource(),
+      relevantLearnedTransition: position && waypoint ? cloneValue(findBestKnownTransition(position, waypoint)) : null,
       pausedForCombat: state.pausedForCombat,
       expectedFloor: state.expectedFloor,
       pausedForFloorMove: state.pausedForFloorMove,
@@ -2170,6 +2488,7 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
       lastVerificationNotice: state.lastVerificationNotice,
       lastVerificationSeenAt: state.lastVerificationSeenAt,
       sellerTrip: getSellerTripStatus(),
+      homeRouteValid: !!(config.homePresetName && getValidatedHomeRoute(false)),
       freeCapacity: Number(bot.getPlayerSnapshot?.()?.capacity) || null,
     };
   }
@@ -2178,6 +2497,7 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     Object.assign(config, nextConfig);
     config.allowFloorTransitions = config.allowFloorTransitions === true;
     config.prioritizeMonsters = config.prioritizeMonsters === true;
+    config.randomizeMovement = config.randomizeMovement === true;
     config.autoRecoverWaypoints = config.autoRecoverWaypoints !== false;
     config.limitChaseToRoute = config.limitChaseToRoute === true;
     config.maxChaseFromRouteTiles = Math.max(2, Math.min(20, Math.trunc(Number(config.maxChaseFromRouteTiles) || 6)));
@@ -2187,21 +2507,36 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     config.minimumFreeCapacity = Math.max(1, Math.min(10000, Number(config.minimumFreeCapacity) || 50));
     config.sellerFightOutbound = config.sellerFightOutbound === true;
     config.sellerFightReturn = config.sellerFightReturn === true;
+    config.homePresetName = String(config.homePresetName || '').trim();
+    config.travelFight = config.travelFight === true;
     config.useWaypointTools = config.useWaypointTools !== false;
     config.pauseWaypointsOnVerification = config.pauseWaypointsOnVerification === true;
     config.verificationScanTickMs = Math.max(200, Math.min(5000, Math.round(Number(config.verificationScanTickMs) || 500)));
+    config.pauseOnModeratorMessage = config.pauseOnModeratorMessage === true;
+    config.moderatorPauseMs = Math.max(20000, Math.min(120000, Number(config.moderatorPauseMs) || 30000));
     config.tickMs = 500;
-    if (!config.pauseWaypointsOnVerification) state.pausedForVerification = false;
+    if (!config.pauseWaypointsOnVerification) {
+      state.pausedForVerification = false;
+      bot.attack?.setMovementHold?.('verification', false);
+    }
+    if (!config.pauseOnModeratorMessage && state.pausedForModeratorUntil) {
+      state.pausedForModeratorUntil = 0;
+      bot.attack?.setMovementHold?.('moderator', false);
+    }
     restartVerificationScanner();
+    restartModeratorScanner();
     persistConfig();
     bot.log("cave config updated", { ...config });
     return { ...config };
   }
 
   restartVerificationScanner();
+  restartModeratorScanner();
   bot.addCleanup(() => {
     if (state.verificationTimerId != null) window.clearInterval(state.verificationTimerId);
     state.verificationTimerId = null;
+    if (state.moderatorScannerTimerId != null) window.clearInterval(state.moderatorScannerTimerId);
+    state.moderatorScannerTimerId = null;
   });
   startObserver();
   bot.addCleanup(stopObserver);
@@ -2219,6 +2554,8 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     updateConfig,
     resumeAfterVerification,
     beginSellerTrip,
+    goHome,
+    goToHunt,
     getSellerTripStatus,
     getSellerEscortWaypoints,
     resumeFromSeller,
@@ -2227,6 +2564,10 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     scanVerificationNotice,
     config,
     getRoute,
+    getEntryWaypointCount,
+    setEntryWaypointCount,
+    isModeratorSender,
+    isModeratorChatMessage,
     getTransitions,
     getPresetNames,
     getActivePresetName,

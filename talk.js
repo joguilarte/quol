@@ -331,6 +331,14 @@ window.__minibiaBotBundle.installTalkModule = function installTalkModule(bot) {
     ).slice(-6);
   }
 
+  // Incantations are gameplay traffic, not Portuguese (e.g. "exeta con").
+  // Filter BEFORE classification and sending any request to Gemini.
+  function isSpellIncantation(text) {
+    const value = String(text || '').trim().toLowerCase()
+      .replace(/^(?:\d{1,2}:\d{2}\s+)?[^\n:]{1,85}\s+(?:says|yells|whispers):\s*/i, '');
+    return /^(?:exeta|exori|exura|exiva|exana|exani|exevo|exolo|utani|utamo|utito|utana|utura|utori|utevo|adori|adevo|adana|alana|aleta|alito)\b(?:\s+[a-z]{1,18}){0,5}[.!]*$/i.test(value);
+  }
+
   function getNewestPendingMessage() {
     const pendingMessages = getEligibleMessages().filter((message) => {
       if (!message?.body || !message?.key) {
@@ -341,7 +349,8 @@ window.__minibiaBotBundle.installTalkModule = function installTalkModule(bot) {
         return false;
       }
 
-      if (!message.sender || isSelfMessage(message) ||
+      if (!message.sender || isSpellIncantation(message.body) ||
+          bot.cave?.isModeratorChatMessage?.(message) || isSelfMessage(message) ||
           (isNpcMessage(message) && !config.replyToNpcs) ||
           (!isNpcMessage(message) && isTrustedSender(message))) {
         rememberSeenMessage(message);
@@ -596,6 +605,7 @@ window.__minibiaBotBundle.installTalkModule = function installTalkModule(bot) {
   }
 
   function sendToCorrectChannel(target, reply) {
+    if (bot.cave?.isModeratorChatMessage?.(target)) return false;
     const manager = window.gameClient?.interface?.channelManager;
     if (!manager || typeof manager.sendMessageText !== "function") return false;
     if (!reply || reply.trim().startsWith("/")) return false;
@@ -804,6 +814,7 @@ window.__minibiaBotBundle.installTalkModule = function installTalkModule(bot) {
   async function previewReply(message) {
     const body = String(message || "").trim().slice(0, 240);
     if (!body) throw new Error("Enter a message to simulate.");
+    if (isSpellIncantation(body)) return '(ignored: game spell)';
     const sample = { sender: "TestPlayer", body, privateMessage: false };
     if (config.replyMode === "rules") {
       return unavailableLanguageReply(detectLanguageFallback(body)) || sanitizeReply(findRuleReply(body));
@@ -856,6 +867,7 @@ window.__minibiaBotBundle.installTalkModule = function installTalkModule(bot) {
     status,
     updateConfig,
     getChatMessages,
+    isSpellIncantation,
     previewReply,
     config,
   };
