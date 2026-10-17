@@ -40,6 +40,8 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
 
   function refreshPanicStatus() {
     const unknownToggle = document.getElementById("minibia-bot-panic-unknown");
+    const unknownAlarmToggle = document.getElementById("minibia-bot-panic-unknown-alarm");
+    const smartChatToggle = document.getElementById("minibia-bot-panic-smart-chat");
     const healthToggle = document.getElementById("minibia-bot-panic-health");
     const returnToggle = document.getElementById("minibia-bot-panic-return");
     const status = bot.panic?.status?.();
@@ -47,6 +49,10 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     if (unknownToggle) {
       unknownToggle.checked = !!status?.config?.unknownPlayerEnabled;
     }
+    if (unknownAlarmToggle) {
+      unknownAlarmToggle.checked = !!status?.config?.unknownPlayerSoundAlertEnabled;
+    }
+    if (smartChatToggle) smartChatToggle.checked = !!status?.config?.smartChatAlertEnabled;
 
     if (healthToggle) {
       healthToggle.checked = !!status?.config?.healthLossEnabled;
@@ -256,7 +262,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
       } else if (status?.moderatorPaused) {
         statusLabel.textContent = `GM chat ALARM: ${Math.ceil(status.moderatorPauseRemainingMs/1000)}s — movement stopped, attack stationary, Heal active`;
       } else if (status?.pausedForVerification) {
-        statusLabel.textContent = "ALARM: verification notice. Movement and chase stopped; attack in place; resume manually.";
+        statusLabel.textContent = `CAPTCHA ALERT ${status.verificationLastPhase||''}: no movement/chase; stationary attack and Heal stay on. Restore manually after challenge.`;
       } else if (status?.running) {
         const waypointNumber = (status.currentIndex ?? 0) + 1;
         const distanceLabel =
@@ -392,7 +398,9 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     }
 
     if (statusLabel) {
-      if (status?.config?.replyMode === "gemini" && !status?.config?.apiKey) {
+      if (status?.lastGeminiFailureAt && Date.now()-status.lastGeminiFailureAt<45000) {
+        statusLabel.textContent = `Last auto-reply failure: ${status.lastGeminiError} (alarm ${status.config.alarmOnGeminiFailure?'ON':'OFF'}; no modules changed)`;
+      } else if (status?.config?.replyMode === "gemini" && !status?.config?.apiKey) {
         statusLabel.textContent = "Status: Gemini API key missing";
       } else if (status?.pending) {
         statusLabel.textContent = "Status: preparing reply";
@@ -1123,6 +1131,13 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
                 <span>Unknown Player</span>
               </label>
               <label class="mb-toggle">
+                <input type="checkbox" id="minibia-bot-panic-unknown-alarm" />
+                <span>Unknown player alarm (sound only; same floor)</span>
+              </label>
+              <div class="mb-small-note">Alerts on unfamiliar visible players, not monsters. Uses Trusted names; does not identify a hidden GM or stop any module.</div>
+              <label class="mb-toggle"><input type="checkbox" id="minibia-bot-panic-smart-chat" /><span>Smart chat alerts: private + targeted Default (sound only)</span></label>
+              <div class="mb-small-note">Alerts on new private messages or Default messages mentioning your name / directly asking if you are there. Ignores spells, trusted senders and old history. Does not alter hunt or attack. Separate from GM/CAPTCHA alerts.</div>
+              <label class="mb-toggle">
                 <input type="checkbox" id="minibia-bot-panic-health" />
                 <span>Lose Health</span>
               </label>
@@ -1156,6 +1171,8 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
                 </label>
                 <input type="text" id="minibia-bot-rune-spell" placeholder="Spell words" />
                 <input type="number" id="minibia-bot-rune-mana" min="0" placeholder="Mana" />
+                <label class="mb-field mb-field-compact"><span class="mb-field-label">Min interval (s)</span><input type="number" id="minibia-bot-rune-interval-min" min="1" max="3600" step="0.5" /></label>
+                <label class="mb-field mb-field-compact"><span class="mb-field-label">Max interval (s)</span><input type="number" id="minibia-bot-rune-interval-max" min="1" max="3600" step="0.5" /></label>
               </div>
               <div class="mb-row mb-row-compact">
                 <label class="mb-toggle">
@@ -1242,6 +1259,8 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
                 <input type="checkbox" id="minibia-bot-talk-enabled" />
                 <span>Enable Auto Reply</span>
               </label>
+              <label class="mb-toggle"><input type="checkbox" id="minibia-bot-talk-gemini-alarm"/><span>Alarm on failed automatic Gemini reply (sound only)</span></label>
+              <div class="mb-small-note">Sounds the usual alarm on API error, timeout, empty response or delivery failure. Does not stop or change any module; no alarm for filtered messages or preview tests. Up to once every 30 seconds.</div>
               <label class="mb-toggle">
                 <input type="checkbox" id="minibia-bot-talk-npc-replies" />
                 <span>Reply to nearby NPCs (any name)</span>
@@ -1400,9 +1419,9 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
               </label>
               <div class="mb-actions mb-actions-inline-two">
                 <button type="button" class="mb-small-button" id="minibia-bot-cave-test-alarm">Test Loud Alarm</button>
-                <button type="button" class="mb-small-button" id="minibia-bot-cave-resume-verification">Resume Waypoints</button>
+                <button type="button" class="mb-small-button" id="minibia-bot-cave-resume-verification">RESTORE AFTER CAPTCHA</button>
               </div>
-              <div class="mb-small-note">Check the toggle to enable notifications. Test audio once with the button. Waypoints and chase pause: Attack continues in place and Heal continues. Resume manually after verification. Detection depends on matching notices in chat/UI.</div>
+              <div class="mb-small-note">Alarms at 60, 30 and 15 second warnings (once per phase). Navigation/chase stop; Attack keeps targeting without following, and Heal remains on if previously enabled. After resolving the challenge, RESTORE re-enables only previously running modules. This does not complete CAPTCHA.</div>
               <div class="mb-actions mb-actions-inline-two">
                 <button type="button" class="mb-small-button" id="minibia-bot-cave-start">Start</button>
                 <button type="button" class="mb-small-button" id="minibia-bot-cave-stop">Stop</button>
@@ -1468,11 +1487,21 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
         <label class="mb-toggle"><input id="minibia-bot-quick-leash" type="checkbox"/><span>Limit chase to route</span></label>
         <label class="mb-toggle"><input id="minibia-bot-quick-heal" type="checkbox"/><span>Auto Heal</span></label>
         <label class="mb-toggle"><input id="minibia-bot-quick-talk" type="checkbox"/><span>Auto Reply (Gemini)</span></label>
+        <label class="mb-toggle"><input id="minibia-bot-quick-gemini-alarm" type="checkbox"/><span>Alarm if Gemini auto-reply fails (sound only)</span></label>
+        <label class="mb-toggle"><input id="minibia-bot-quick-smart-chat" type="checkbox"/><span>Smart chat alarm: PM + targeted Default (sound only)</span></label>
         <label class="mb-toggle"><input id="minibia-bot-quick-moderator" type="checkbox"/><span>GM alert: 30s stand &amp; fight</span></label>
         <label class="mb-toggle"><input id="minibia-bot-quick-verification" type="checkbox"/><span>Anti-bot notice: alarm &amp; stand (manual resume)</span></label>
         <label class="mb-toggle"><input id="minibia-bot-quick-travel-fight" type="checkbox"/><span>Fight on GO HOME / GO HUNT (else walk only)</span></label>
         <label class="mb-quick-hint" for="minibia-bot-quick-chase">Chase <select id="minibia-bot-quick-chase"><option value="pathfinder">Bot pathfinding</option><option value="hybrid">Hybrid</option><option value="native">Native</option></select></label>
       </div>
+      <div class="mb-quick-training mb-row" style="display:flex;flex-wrap:wrap;gap:8px;align-items:end;margin:8px 0;">
+        <label class="mb-toggle"><input id="minibia-bot-quick-ml-enabled" type="checkbox"/><span>ML Trainer</span></label>
+        <label class="mb-field" style="flex:2 1 155px"><span class="mb-field-label">Spell</span><input id="minibia-bot-quick-ml-spell" type="text" placeholder="exura" /></label>
+        <label class="mb-field" style="flex:1 1 95px"><span class="mb-field-label">Min interval (s)</span><input id="minibia-bot-quick-ml-min" type="number" min="1" max="3600" step="0.5" /></label>
+        <label class="mb-field" style="flex:1 1 95px"><span class="mb-field-label">Max interval (s)</span><input id="minibia-bot-quick-ml-max" type="number" min="1" max="3600" step="0.5" /></label>
+        <label class="mb-field" style="flex:1 1 80px"><span class="mb-field-label">Minimum mana</span><input id="minibia-bot-quick-ml-mana" type="number" min="0" step="1" /></label>
+      </div>
+      <div class="mb-small-note">After each successful spell, ML Trainer selects a fresh random delay between Min and Max. Mana, HP, food and game cooldown can delay casting further.</div>
       <div class="mb-quick-summary" id="minibia-bot-quick-summary">Quick toggles control the same settings as advanced panels; START HUNT starts the selected route.</div>
       <div class="mb-quick-actions">
         <button id="minibia-bot-quick-go-hunt" type="button">GO HUNT</button>
@@ -1480,7 +1509,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
         <button id="minibia-bot-quick-start" type="button">START HUNT</button>
         <button id="minibia-bot-quick-stop" type="button">STOP HUNT</button>
         <button id="minibia-bot-quick-alarm" type="button">TEST ALARM</button>
-        <button id="minibia-bot-quick-resume-notice" type="button">RESUME AFTER NOTICE</button>
+        <button id="minibia-bot-quick-resume-notice" type="button">RESTORE AFTER CAPTCHA</button>
       </div>
       <div class="mb-small-note">GO HOME requires an explicit route from hunt WP1 to marked Home. GO HUNT uses the reverse route. GM / notice alarm holds movement, keeps stationary attack &amp; Auto Heal. Travel fight works only when Auto Attack was already running.</div>
       <div class="mb-small-note" id="minibia-bot-quick-status">Stopped. Toggles apply immediately; START HUNT starts Cave Bot.</div>`;
@@ -1713,13 +1742,27 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
       leash:quickBar.querySelector('#minibia-bot-quick-leash'),
       heal:quickBar.querySelector('#minibia-bot-quick-heal'),
       talk:quickBar.querySelector('#minibia-bot-quick-talk'),
+      geminiAlarm:quickBar.querySelector('#minibia-bot-quick-gemini-alarm'),
+      smartChat:quickBar.querySelector('#minibia-bot-quick-smart-chat'),
       moderator:quickBar.querySelector('#minibia-bot-quick-moderator'),
       verification:quickBar.querySelector('#minibia-bot-quick-verification'),
       travelFight:quickBar.querySelector('#minibia-bot-quick-travel-fight'),
       chase:quickBar.querySelector('#minibia-bot-quick-chase'),
     };
+    const quickMlEnabled=quickBar.querySelector('#minibia-bot-quick-ml-enabled');
+    const quickMlSpell=quickBar.querySelector('#minibia-bot-quick-ml-spell');
+    const quickMlMin=quickBar.querySelector('#minibia-bot-quick-ml-min');
+    const quickMlMax=quickBar.querySelector('#minibia-bot-quick-ml-max');
+    const quickMlMana=quickBar.querySelector('#minibia-bot-quick-ml-mana');
     function refreshQuickSummary() {
       const a=bot.attack?.status?.(),c=bot.cave?.status?.(),h=bot.heal?.status?.(),t=bot.talk?.status?.();
+      const r=bot.rune?.status?.();
+      const runeConfig=r?.config||{};
+      quickMlEnabled.checked=!!r?.running;
+      if(document.activeElement!==quickMlSpell) quickMlSpell.value=runeConfig.runeSpellWords||'';
+      if(document.activeElement!==quickMlMin) quickMlMin.value=String((runeConfig.runeCooldownMinMs??runeConfig.runeCooldownMs??3500)/1000);
+      if(document.activeElement!==quickMlMax) quickMlMax.value=String((runeConfig.runeCooldownMaxMs??runeConfig.runeCooldownMs??3500)/1000);
+      if(document.activeElement!==quickMlMana) quickMlMana.value=String(runeConfig.runeManaCost??0);
       const attackConfig=a?.config||{},caveConfig=c?.config||{};
       quickControls.attack.checked=!!a?.running;
       quickControls.melee.checked=attackConfig.meleeMode===true;
@@ -1729,6 +1772,8 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
       quickControls.leash.checked=caveConfig.limitChaseToRoute===true;
       quickControls.heal.checked=!!h?.running;
       quickControls.talk.checked=!!t?.running && t?.config?.replyMode==='gemini';
+      quickControls.geminiAlarm.checked=t?.config?.alarmOnGeminiFailure===true;
+      quickControls.smartChat.checked=bot.panic?.config?.smartChatAlertEnabled===true;
       quickControls.moderator.checked=caveConfig.pauseOnModeratorMessage===true;
       quickControls.verification.checked=caveConfig.pauseWaypointsOnVerification===true;
       quickControls.travelFight.checked=caveConfig.travelFight===true;
@@ -1746,19 +1791,28 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
       mirror('minibia-bot-cave-random-movement',caveConfig.randomizeMovement===true);
       mirror('minibia-bot-cave-moderator-pause',caveConfig.pauseOnModeratorMessage===true);
       mirror('minibia-bot-cave-verification-pause',caveConfig.pauseWaypointsOnVerification===true);
+      mirror('minibia-bot-panic-unknown-alarm',bot.panic?.config?.unknownPlayerSoundAlertEnabled===true);
+      mirror('minibia-bot-panic-smart-chat',bot.panic?.config?.smartChatAlertEnabled===true);
       mirror('minibia-bot-cave-limit-chase',caveConfig.limitChaseToRoute===true);
       mirror('minibia-bot-auto-heal-enabled',!!h?.running);
       mirror('minibia-bot-talk-enabled',!!t?.running);
       mirror('minibia-bot-talk-mode',t?.config?.replyMode||'rules');
+      mirror('minibia-bot-talk-gemini-alarm',t?.config?.alarmOnGeminiFailure===true);
+      mirror('minibia-bot-rune-enabled',!!r?.running);
+      mirror('minibia-bot-rune-spell',runeConfig.runeSpellWords||'');
+      mirror('minibia-bot-rune-mana',runeConfig.runeManaCost??0);
+      mirror('minibia-bot-rune-interval-min',(runeConfig.runeCooldownMinMs??runeConfig.runeCooldownMs??3500)/1000);
+      mirror('minibia-bot-rune-interval-max',(runeConfig.runeCooldownMaxMs??runeConfig.runeCooldownMs??3500)/1000);
       const chaseAdvanced=panel.querySelector('#minibia-bot-auto-attack-chase-controller');
       if(chaseAdvanced) chaseAdvanced.disabled=attackConfig.meleeMode===false;
       quickSummary.textContent=`Attack ${a?.running?'ON':'OFF'} · Melee ${attackConfig.meleeMode?'ON':'OFF'} · `+
         `Chase ${attackConfig.chaseController||'hybrid'} · Stair guard ${attackConfig.avoidFloorChangesOnChase!==false?'ON':'OFF'} · `+
-        `Heal ${h?.running?'ON':'OFF'} · Gemini ${quickControls.talk.checked?'ON':'OFF'} · `+
+        `Heal ${h?.running?'ON':'OFF'} · Gemini ${quickControls.talk.checked?'ON':'OFF'} · Gemini alarm ${quickControls.geminiAlarm.checked?'ON':'OFF'} · `+
+        `ML Trainer ${r?.running?'ON':'OFF'} (${(runeConfig.runeCooldownMinMs??runeConfig.runeCooldownMs??3500)/1000}–${(runeConfig.runeCooldownMaxMs??runeConfig.runeCooldownMs??3500)/1000}s) · `+
         `Floor changes ${caveConfig.allowFloorTransitions?'allowed':'blocked'} · `+
         `Priority ${caveConfig.prioritizeMonsters?'ON':'OFF'} · `+
         `Random ${caveConfig.randomizeMovement?'ON':'OFF'} · Entry once ${c?.entryWaypointCount||0} WPs · `+
-        `GM alarm ${caveConfig.pauseOnModeratorMessage?'ON':'OFF'} · Notice alarm ${caveConfig.pauseWaypointsOnVerification?'ON':'OFF'} · `+
+        `Smart chat alarm ${bot.panic?.config?.smartChatAlertEnabled?'ON':'OFF'} · Nearby player alarm ${bot.panic?.config?.unknownPlayerSoundAlertEnabled?'ON':'OFF'} · GM alarm ${caveConfig.pauseOnModeratorMessage?'ON':'OFF'} · Notice alarm ${caveConfig.pauseWaypointsOnVerification?'ON':'OFF'} · `+
         `Travel fight ${caveConfig.travelFight?'ON':'OFF'} · Home ${c?.homeRouteValid?'ready':'route needed'}. Settings synced.`;
     }
     function refreshQuickRoutes() {
@@ -1779,11 +1833,18 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
       }
       quickStart.disabled=!names.length;
       const em=bot.emergencyState?.();
-      const trip=bot.cave?.status?.()?.sellerTrip;
+      const caveStatus=bot.cave?.status?.()||{};
+      const trip=caveStatus.sellerTrip;
+      if (!em?.halted && caveStatus.verificationLastRestoreAt &&
+          Date.now()-caveStatus.verificationLastRestoreAt < 12000) {
+        quickStatus.textContent=caveStatus.verificationLastRestore?.reason || 'Verification restore complete';
+        refreshQuickSummary();
+        return;
+      }
       quickStatus.textContent=em?.halted ? (em.canResume ? 'Emergency paused. Use ▶ to resume previous modules.' : 'Emergency paused; reload cleared resume snapshot.') :
         (trip?.kind==='home' ? (trip.phase==='waiting-at-home'?'At HOME — choose GO HUNT to return':'Home travel: '+trip.phase) :
         (bot.cave?.status?.()?.moderatorPaused ? 'GM ALERT: standing still; attack in place; alarm sounded' :
-        bot.cave?.status?.()?.pausedForVerification ? 'NOTICE ALERT: standing still; press RESUME AFTER NOTICE' :
+        bot.cave?.status?.()?.pausedForVerification ? `CAPTCHA ALERT ${bot.cave.status().verificationLastPhase||''}: stationary attack, press RESTORE after solving` :
         (bot.cave?.status?.()?.running ? 'Hunt active' : 'Hunt stopped; quick toggles can still control other modules')));
       refreshQuickSummary();
     }
@@ -1805,7 +1866,9 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
       bot.unlockAudio?.();bot.playAlarm?.();quickStatus.textContent='Alarm test requested (check browser sound)';
     });
     quickResumeNotice.addEventListener('click',()=>{
-      bot.cave?.resumeAfterVerification?.();quickStatus.textContent='Verification pause cleared by operator';
+      const result=bot.cave?.resumeAfterVerification?.();
+      quickStatus.textContent=result?.reason || 'Unable to restore verification session';
+      refreshQuickSummary();
     });
     function quickControl(id,callback){quickControls[id].addEventListener('change',()=>{
       if(bot.emergencyState?.().halted) bot.emergencyDismiss?.();
@@ -1823,6 +1886,37 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     quickControl('leash',(on)=>bot.cave.updateConfig({limitChaseToRoute:on}));
     quickControl('heal',(on)=>on?bot.heal.start():bot.heal.stop());
     quickControl('chase',(value)=>bot.attack.updateConfig({chaseController:value}));
+    quickControl('geminiAlarm',(on)=>bot.talk.updateConfig({alarmOnGeminiFailure:on}));
+    quickControl('smartChat',(on)=>{
+      bot.panic.updateConfig({smartChatAlertEnabled:on, ...(on?{unknownPlayerSoundAlertEnabled:false}:{})});
+      refreshPanicStatus();
+    });
+    function quickMlSave(changedField='') {
+      const runeConfig=bot.rune?.config||{};
+      const runeSpellWords=quickMlSpell.value.trim().slice(0,90);
+      const previousMin=(runeConfig.runeCooldownMinMs??runeConfig.runeCooldownMs??3500)/1000;
+      const previousMax=(runeConfig.runeCooldownMaxMs??runeConfig.runeCooldownMs??3500)/1000;
+      const parseSeconds=(input,fallback)=>{
+        const n=Number(input.value);
+        return input.value.trim()!=='' && Number.isFinite(n) ? Math.min(3600,Math.max(1,n)) : fallback;
+      };
+      let min=parseSeconds(quickMlMin,previousMin);
+      let max=parseSeconds(quickMlMax,previousMax);
+      if(min>max) {if(changedField==='max') min=max; else max=min;}
+      const runeManaCost=Math.max(0,Math.floor(Number(quickMlMana.value)||0));
+      bot.rune?.updateConfig?.({runeSpellWords,runeCooldownMinMs:Math.round(min*1000),runeCooldownMaxMs:Math.round(max*1000),runeManaCost});
+      refreshQuickSummary();
+    }
+    quickMlSpell.addEventListener('change',()=>quickMlSave());
+    quickMlMin.addEventListener('change',()=>quickMlSave('min'));
+    quickMlMax.addEventListener('change',()=>quickMlSave('max'));
+    quickMlMana.addEventListener('change',()=>quickMlSave());
+    quickMlEnabled.addEventListener('change',()=>{
+      const desiredRunning=quickMlEnabled.checked; // Save refreshes UI, so preserve the user's click.
+      quickMlSave();
+      if(desiredRunning) bot.rune?.start?.(); else bot.rune?.stop?.();
+      refreshRuneStatus();refreshQuickSummary();
+    });
     quickControl('talk',(on)=>{
       if(on){bot.talk.updateConfig({replyMode:'gemini'});if(!bot.talk.status().running) {
         if(!bot.talk.start()) quickStatus.textContent='Gemini could not start; check API key in Talk';
@@ -1873,6 +1967,8 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
 
     const spellInput = panel.querySelector("#minibia-bot-rune-spell");
     const manaInput = panel.querySelector("#minibia-bot-rune-mana");
+    const runeMinInput = panel.querySelector("#minibia-bot-rune-interval-min");
+    const runeMaxInput = panel.querySelector("#minibia-bot-rune-interval-max");
     const runeEnabledInput = panel.querySelector("#minibia-bot-rune-enabled");
     const autoEatEnabledInput = panel.querySelector("#minibia-bot-auto-eat-enabled");
     const autoEatHotkeyInput = panel.querySelector("#minibia-bot-auto-eat-hotkey");
@@ -1929,6 +2025,11 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     });
     const talkEnabledInput = panel.querySelector("#minibia-bot-talk-enabled");
     const talkModeInput = panel.querySelector("#minibia-bot-talk-mode");
+    const talkGeminiAlarmInput = panel.querySelector("#minibia-bot-talk-gemini-alarm");
+    talkGeminiAlarmInput?.addEventListener('change',()=>{
+      bot.talk?.updateConfig?.({alarmOnGeminiFailure:talkGeminiAlarmInput.checked});
+      refreshQuickSummary();
+    });
     const talkAiSettings = panel.querySelector("#minibia-bot-talk-ai-settings");
     const talkRulesInput = panel.querySelector("#minibia-bot-talk-rules");
     const talkMinDelayInput = panel.querySelector("#minibia-bot-talk-min-delay");
@@ -1940,6 +2041,8 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     const panicGmNameInput = panel.querySelector("#minibia-bot-panic-gm-input");
     const panicGmAddButton = panel.querySelector("#minibia-bot-panic-gm-add");
     const panicUnknownInput = panel.querySelector("#minibia-bot-panic-unknown");
+    const panicUnknownAlarmInput = panel.querySelector("#minibia-bot-panic-unknown-alarm");
+    const panicSmartChatInput = panel.querySelector("#minibia-bot-panic-smart-chat");
     const panicHealthInput = panel.querySelector("#minibia-bot-panic-health");
     const panicReturnInput = panel.querySelector("#minibia-bot-panic-return");
     const panicTrustedInput = panel.querySelector("#minibia-bot-panic-trusted-input");
@@ -2080,6 +2183,27 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
       });
     }
 
+    if (runeMinInput && runeMaxInput) {
+      const config=bot.rune?.config||{};
+      runeMinInput.value=String((config.runeCooldownMinMs??config.runeCooldownMs??3500)/1000);
+      runeMaxInput.value=String((config.runeCooldownMaxMs??config.runeCooldownMs??3500)/1000);
+      function saveAdvancedInterval(changedField) {
+        const current=bot.rune?.config||{};
+        const readSeconds=(input,fallback)=>{
+          const n=Number(input.value);
+          return input.value.trim()!=='' && Number.isFinite(n) ? Math.min(3600,Math.max(1,n)) : fallback;
+        };
+        let min=readSeconds(runeMinInput,(current.runeCooldownMinMs??current.runeCooldownMs??3500)/1000);
+        let max=readSeconds(runeMaxInput,(current.runeCooldownMaxMs??current.runeCooldownMs??3500)/1000);
+        if(min>max) {if(changedField==='max') min=max; else max=min;}
+        bot.rune.updateConfig({runeCooldownMinMs:Math.round(min*1000),runeCooldownMaxMs:Math.round(max*1000)});
+        runeMinInput.value=String(bot.rune.config.runeCooldownMinMs/1000);
+        runeMaxInput.value=String(bot.rune.config.runeCooldownMaxMs/1000);
+        refreshQuickSummary();
+      }
+      runeMinInput.addEventListener('change',()=>saveAdvancedInterval('min'));
+      runeMaxInput.addEventListener('change',()=>saveAdvancedInterval('max'));
+    }
     if (runeEnabledInput) {
       runeEnabledInput.checked = !!bot.rune?.status?.().running;
       runeEnabledInput.addEventListener("change", () => {
@@ -2352,8 +2476,10 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
 
     if (caveResumeVerificationButton) {
       caveResumeVerificationButton.addEventListener("click", () => {
-        bot.cave.resumeAfterVerification();
+        const result=bot.cave.resumeAfterVerification();
         refreshCaveStatus();
+        const label=panel.querySelector('#minibia-bot-cave-status');
+        if(label) label.textContent=result?.reason || 'Unable to restore';
       });
     }
 
@@ -2747,6 +2873,24 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
       panicUnknownInput.addEventListener("change", () => {
         bot.panic.updateConfig({ unknownPlayerEnabled: panicUnknownInput.checked });
         refreshPanicStatus();
+      });
+    }
+
+    if (panicUnknownAlarmInput) {
+      panicUnknownAlarmInput.checked = !!bot.panic?.status?.().config?.unknownPlayerSoundAlertEnabled;
+      panicUnknownAlarmInput.addEventListener("change", () => {
+        bot.panic.updateConfig({ unknownPlayerSoundAlertEnabled: panicUnknownAlarmInput.checked });
+        refreshPanicStatus();
+        refreshQuickSummary();
+      });
+    }
+
+    if (panicSmartChatInput) {
+      panicSmartChatInput.checked = !!bot.panic?.status?.().config?.smartChatAlertEnabled;
+      panicSmartChatInput.addEventListener('change', () => {
+        bot.panic.updateConfig({smartChatAlertEnabled:panicSmartChatInput.checked,
+          ...(panicSmartChatInput.checked?{unknownPlayerSoundAlertEnabled:false}:{})});
+        refreshPanicStatus(); refreshQuickSummary();
       });
     }
 
