@@ -9190,21 +9190,40 @@ window.__minibiaBotBundle.installAutoSellModule = function installAutoSellModule
         }
       }
       if (now - state.lastActionAt < 1200) return false;
-      // OfferModal changes a selected canvas from "slot offer-slot" to
-      // "slot selected"; querying only .offer-slot drops the previously
-      // selected item and shifts every subsequent trade offer by one.
-      // All offers, including the selected one, retain the .slot class.
-      const offerSlots = Array.from(modal.element?.querySelectorAll?.(".offers > canvas.slot") || []);
+      // The selected offer changes from .offer-slot to .selected; never
+      // enumerate only .offer-slot, otherwise later indices shift. Some
+      // Minibia client builds also wrap the canvas in another element.
+      // Read the *complete* visible offer grid and require a one-to-one
+      // mapping with __offers before attempting any transaction.
+      function getOfferSlots() {
+        const container = modal.element?.querySelector?.(".offers");
+        if (container) {
+          const nodes = Array.from(container.querySelectorAll?.("canvas.slot") || []);
+          if (nodes.length) return nodes;
+          return Array.from(container.querySelectorAll?.(".slot") || []).filter((n) => typeof n.click === "function");
+        }
+        // Compatibility with older client/modal wrappers.
+        return Array.from(modal.element?.querySelectorAll?.(".offers .slot") || []);
+      }
       const visibleOffers = modal.__offers.filter((o) => o?.type === "buy");
-      const filteredIndex = modal.__offers.filter((o,i)=>i < index && o?.type === "buy").length;
-      const slot = offerSlots[filteredIndex];
+      const filteredIndex = modal.__offers.filter((o, i) => i < index && o?.type === "buy").length;
       const slider = document.getElementById("buy-count");
-      if (modal.__offerType !== "buy" || offerSlots.length !== visibleOffers.length ||
-          !slot || !slider || typeof modal.handleConfirm !== "function") {
-        pause("NPC sell offers changed; manual sale required");
+      if (modal.__offerType !== "buy" || !slider || typeof modal.handleConfirm !== "function") {
+        pause("NPC trade controls unavailable; manual sale required");
         return false;
       }
-      slot.click();
+      let offerSlots = getOfferSlots();
+      if (offerSlots.length !== visibleOffers.length && typeof modal.setOffers === "function") {
+        // The server may have refreshed __offers after the grid rendered.
+        // Rebuild the grid once; do not guess indices or click until synced.
+        modal.setOffers();
+        offerSlots = getOfferSlots();
+      }
+      if (offerSlots.length !== visibleOffers.length || !offerSlots[filteredIndex]) {
+        pause(`NPC offer grid mismatch (${offerSlots.length} visible / ${visibleOffers.length} expected); manual sale required`);
+        return false;
+      }
+      offerSlots[filteredIndex].click();
       const selected = modal.__offers[modal.__selectedOffer];
       if (modal.__offerType !== "buy" || modal.__selectedOffer !== index ||
           selected?.type !== "buy" || Number(selected?.id) !== Number(offer.id) ||
