@@ -9071,6 +9071,7 @@ window.__minibiaBotBundle.installAutoSellModule = function installAutoSellModule
     lastNpcTradeAt: 0,
     previousTrip: null,
     manualSession: false,
+    lastSelection: null,
   };
   let timerId = null;
   const norm = (s) => String(s || "").trim().toLocaleLowerCase().replace(/\s+/g, " ");
@@ -9135,6 +9136,7 @@ window.__minibiaBotBundle.installAutoSellModule = function installAutoSellModule
     state.lastActionAt = 0;
     state.lastNpcInteractAt = 0;
     state.lastNpcTradeAt = 0;
+    state.lastSelection = null;
   }
   function pause(reason) {
     state.phase = "needs-attention";
@@ -9223,12 +9225,32 @@ window.__minibiaBotBundle.installAutoSellModule = function installAutoSellModule
         pause(`NPC offer grid mismatch (${offerSlots.length} visible / ${visibleOffers.length} expected); manual sale required`);
         return false;
       }
-      offerSlots[filteredIndex].click();
+      // Minibia's OfferModal exposes handleSelectOffer(canvas, offer, index).
+      // Invoke that same UI selection handler explicitly rather than relying
+      // on a synthetic DOM click (which can leave the previous item selected
+      // on some client builds after an inventory update).
+      const slot = offerSlots[filteredIndex];
+      if (typeof modal.handleSelectOffer === "function") {
+        modal.handleSelectOffer({ canvas: slot }, offer, index);
+      } else if (typeof slot.click === "function") {
+        slot.click(); // Older Minibia client versions.
+      } else {
+        pause("NPC offer selection handler unavailable; manual sale required");
+        return false;
+      }
       const selected = modal.__offers[modal.__selectedOffer];
+      const shownName = document.getElementById("offer-name")?.textContent?.trim();
+      state.lastSelection = {
+        requested: offer.name, requestedIndex: index, requestedId: Number(offer.id),
+        selected: selected?.name || null, selectedIndex: modal.__selectedOffer,
+        selectedId: Number(selected?.id) || null, shownName: shownName || null,
+        method: typeof modal.handleSelectOffer === "function" ? "native-handler" : "dom-click"
+      };
       if (modal.__offerType !== "buy" || modal.__selectedOffer !== index ||
           selected?.type !== "buy" || Number(selected?.id) !== Number(offer.id) ||
-          norm(selected?.name) !== norm(offer.name)) {
-        pause("Could not verify selected NPC sell offer");
+          norm(selected?.name) !== norm(offer.name) ||
+          (shownName && norm(shownName) !== norm(offer.name))) {
+        pause(`NPC selection mismatch: wanted ${offer.name} #${index}, got ${selected?.name || "none"} #${modal.__selectedOffer}; manual sale required`);
         return false;
       }
       const amount = Math.min(qty, 100, Math.max(1, Number(slider.max) || 100));
@@ -9315,7 +9337,9 @@ window.__minibiaBotBundle.installAutoSellModule = function installAutoSellModule
   function status() {
     return { enabled: config.enabled, phase: state.phase, pauseReason: state.pauseReason,
       sold: state.sold, attempted: state.attempted, pending: state.pending ? {
-        item: state.pending.offer.name, quantity: state.pending.quantity } : null, config: {...config} };
+        item: state.pending.offer.name, quantity: state.pending.quantity } : null,
+      lastSelection: state.lastSelection ? {...state.lastSelection} : null,
+      config: {...config} };
   }
   function reset() { resetTrip(); state.manualSession = false; state.previousTrip = null; }
   timerId = window.setInterval(() => {
