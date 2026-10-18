@@ -6361,7 +6361,9 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     return trip ? { kind: trip.kind || 'seller', phase: trip.phase, index: trip.index,
       sellerPresetName: trip.sellerPresetName, returnPresetName: trip.returnPresetName, attackWasRunning: trip.attackWasRunning,
       combatEnabled: isSellerEscortCombatEnabled(trip),
-      sellerWaypoints: trip.sellerRoute.length } : null;
+      sellerWaypoints: trip.sellerRoute.length,
+      recordedDirection: trip.recordedDirection || 'hunt-to-seller',
+      huntWaypointIndex: trip.huntWaypointIndex ?? 0 } : null;
   }
 
   function isSellerEscortCombatEnabled(trip) {
@@ -6399,20 +6401,59 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     return [...route, ...trip.sellerRoute, ...(trip.returnRoute || [])].map((point) => cloneValue(point));
   }
 
+  // Normalize both recording directions to hunt-anchor -> seller. Only accept
+  // an endpoint matching EXACTLY one repeatable hunt waypoint. This avoids
+  // guessing a floor/entrance when a preset is accidentally selected.
+  function getValidatedSellerRoute(logFailure = true) {
+    const preset = getPresetByName(config.sellerPresetName);
+    const fail = (reason) => {
+      if (logFailure) bot.log('seller route invalid: ' + reason);
+      return null;
+    };
+    if (!preset || preset.route.length < 2 || route.length < 2 ||
+        preset.name.toLowerCase() === getActivePresetName().toLowerCase()) {
+      return fail('select a separate saved Shanar route with at least two waypoints');
+    }
+    const first = preset.route[0];
+    const last = preset.route[preset.route.length - 1];
+    const validHuntStart = Math.min(Math.max(0, entryWaypointCount), route.length - 1);
+    const match = (point) => route.map((candidate, index) => ({candidate, index}))
+      .filter(({candidate, index}) => index >= validHuntStart && isSameTile(candidate, point))
+      .map(({index}) => index);
+    const firstMatches = match(first);
+    const lastMatches = match(last);
+    if (firstMatches.length + lastMatches.length !== 1) return fail(
+      'exactly one route END must coincide with a single hunt waypoint (not an entry-only waypoint)');
+    const recordedFromSeller = lastMatches.length === 1;
+    const huntWaypointIndex = recordedFromSeller ? lastMatches[0] : firstMatches[0];
+    const sellerRoute = (recordedFromSeller ? [...preset.route].reverse() : preset.route)
+      .map((point) => cloneValue(point));
+    const npcPosition = sellerRoute[sellerRoute.length - 1];
+    let returnRoute = null, returnTransitions = [];
+    let returnPresetName = '';
+    if (config.sellerReturnPresetName) {
+      const returnPreset = getPresetByName(config.sellerReturnPresetName);
+      if (!returnPreset || returnPreset.route.length < 2) return fail('return preset not found');
+      const ret = returnPreset.route;
+      if (isSameTile(ret[0], npcPosition) && isSameTile(ret[ret.length - 1], sellerRoute[0])) {
+        returnRoute = ret.map((point) => cloneValue(point));
+      } else if (isSameTile(ret[ret.length - 1], npcPosition) && isSameTile(ret[0], sellerRoute[0])) {
+        returnRoute = [...ret].reverse().map((point) => cloneValue(point));
+      } else return fail('return preset must connect the same exact NPC and hunt endpoints');
+      returnTransitions = returnPreset.transitions.map((item) => cloneValue(item));
+      returnPresetName = returnPreset.name;
+    }
+    return {sellerRoute, sellerTransitions: preset.transitions.map((item) => cloneValue(item)),
+      returnRoute, returnTransitions, returnPresetName, sellerPresetName:preset.name,
+      huntWaypointIndex, recordedDirection: recordedFromSeller ? 'seller-to-hunt' : 'hunt-to-seller'};
+  }
+
   function beginSellerTrip(force = false) {
     if (!state.running || state.sellerTrip) return false;
     if (!force && !config.autoSellerVisit) return false;
     if (!force && Date.now() < state.sellerTripCooldownUntil) return false;
-    const preset = getPresetByName(config.sellerPresetName);
-    // The recorded seller route MUST begin at hunt route[0], otherwise a
-    // cross-floor or map-wide jump might be treated as a direct path.
-    const start = preset?.route?.[0];
-    if (!preset || preset.route.length < 2 || route.length < 2 ||
-        !start || !isSameTile(start, route[0]) ||
-        preset.name.toLowerCase() === getActivePresetName().toLowerCase()) {
-      if (force) bot.log("seller trip not configured: route must start at the first hunt waypoint");
-      return false;
-    }
+    const seller = getValidatedSellerRoute(force);
+    if (!seller) return false;
     const freeCapacity = Number(bot.getPlayerSnapshot?.()?.capacity);
     if (!force && (!Number.isFinite(freeCapacity) ||
         freeCapacity > config.minimumFreeCapacity)) return false;
@@ -6421,29 +6462,54 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     const attackWasRunning = !!bot.attack?.status?.()?.running;
     const floorMoveWasRunning = !!bot.floorMove?.status?.()?.running;
     if (floorMoveWasRunning) bot.floorMove.stop({ persistEnabled: false });
-    const returnPreset = config.sellerReturnPresetName ? getPresetByName(config.sellerReturnPresetName) : null;
-    if (config.sellerReturnPresetName && (!returnPreset || returnPreset.route.length < 2 ||
-        !isSameTile(returnPreset.route[0], preset.route[preset.route.length - 1]) ||
-        !isSameTile(returnPreset.route[returnPreset.route.length - 1], route[0]))) {
-      bot.log("seller trip rejected: return route must begin at seller and end at first hunt waypoint");
-      return false;
-    }
     state.sellerTrip = {
-      phase: "exit-hunt", index: findClosestWaypointIndex(pos),
-      sellerRoute: preset.route.map((waypoint) => cloneValue(waypoint)),
-      sellerTransitions: preset.transitions.map((entry) => cloneValue(entry)),
-      returnRoute: returnPreset?.route?.map((point) => cloneValue(point)) || null,
-      returnTransitions: returnPreset?.transitions?.map((entry) => cloneValue(entry)) || [],
-      returnPresetName: returnPreset?.name || "",
-      sellerPresetName: preset.name, attackWasRunning, floorMoveWasRunning,
+      phase: "exit-hunt", index: findClosestWaypointIndex(pos, Math.min(entryWaypointCount, route.length-1)),
+      ...seller, attackWasRunning, floorMoveWasRunning,
       lastCombatMode: null, combatPaused: false, lastCombatSeenAt: 0,
     };
     syncSellerEscortCombat(state.sellerTrip);
     state.lastWaypointWalkDestinationKey = null;
     state.lastPathAt = 0;
     bot.log("seller trip started; optional Auto Sell handled separately", {
-      freeCapacity, threshold: config.minimumFreeCapacity, preset: preset.name,
+      freeCapacity, threshold: config.minimumFreeCapacity,
+      preset: seller.sellerPresetName, recordedDirection: seller.recordedDirection,
+      huntWaypoint: seller.huntWaypointIndex + 1,
     });
+    return true;
+  }
+
+  function goToHuntFromSeller() {
+    if (state.sellerTrip || state.pausedForVerification ||
+        state.pausedForModeratorUntil || bot.emergencyState?.()?.halted) return false;
+    const seller = getValidatedSellerRoute(true);
+    const pos = normalizePosition(bot.getPlayerPosition());
+    const npcTile = seller?.sellerRoute?.[seller.sellerRoute.length - 1];
+    if (!seller || !pos || pos.z !== npcTile.z ||
+        Math.max(Math.abs(pos.x - npcTile.x), Math.abs(pos.y - npcTile.y)) > 1) {
+      bot.log('GO HUNT from Shanar requires standing at (or beside) the recorded seller endpoint');
+      return false;
+    }
+    if (state.running) {
+      bot.log('GO HUNT from Shanar requires the Cave Bot to be stopped, without another active trip');
+      return false;
+    }
+    const attackWasRunning = !!bot.attack?.status?.()?.running;
+    // Avoid a premature hunt tick: give the seller return controller ownership first.
+    if (!start({deferFirstTick:true})) return false;
+    state.sellerTrip = {
+      ...seller, phase:'seller-return',
+      index: seller.returnRoute ? 1 : seller.sellerRoute.length - 2,
+      attackWasRunning, floorMoveWasRunning:false,
+      lastCombatMode:null, combatPaused:false, lastCombatSeenAt:0,
+    };
+    state.lastPathAt = 0;
+    state.lastWaypointWalkDestinationKey = null;
+    syncSellerEscortCombat(state.sellerTrip);
+    bot.log('GO HUNT from Shanar started', {
+      recordedDirection: seller.recordedDirection,
+      huntWaypoint: seller.huntWaypointIndex+1,
+    });
+    tick();
     return true;
   }
 
@@ -6555,9 +6621,10 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     if (!trip) return;
     state.sellerTrip = null;
     state.sellerTripCooldownUntil = Date.now() + 60000;
-    state.currentIndex = 0;
-    state.entranceCompleted = false;
-    state.direction = 1;
+    state.currentIndex = Math.max(0, Math.min(route.length - 1, trip.huntWaypointIndex ?? 0));
+    state.entranceCompleted = entryWaypointCount > 0 && state.currentIndex >= entryWaypointCount;
+    state.direction = config.routeTraversalMode === 'pingpong' &&
+      state.currentIndex >= route.length-1 ? -1 : 1;
     state.lastWaypointWalkDestinationKey = null;
     state.lastPathAt = 0;
     state.needsRouteRejoinCheck = false;
@@ -6605,8 +6672,9 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     }
     if (isAtWaypoint(position, destination)) {
       if (trip.phase === "exit-hunt") {
-        if (trip.index === 0) { trip.phase = "seller-out"; trip.index = 0; }
-        else trip.index -= 1;
+        if (trip.index === (trip.huntWaypointIndex ?? 0)) {
+          trip.phase = "seller-out"; trip.index = 0;
+        } else trip.index += trip.index > (trip.huntWaypointIndex ?? 0) ? -1 : 1;
       } else if (trip.phase === "seller-out") {
         if (trip.index === trip.sellerRoute.length - 1) {
           trip.phase = trip.kind === 'home' ? 'waiting-at-home' : 'waiting-at-seller';
@@ -6638,7 +6706,12 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
         stop();bot.playAlarm?.();return true;
       }
       state.expectedFloor=null;
-      handleFloorChange(destination, now);
+      const previous = trip.phase === 'exit-hunt'
+        ? route[trip.index > (trip.huntWaypointIndex ?? 0) ? trip.index + 1 : trip.index - 1]
+        : trip.phase === 'seller-out' ? trip.sellerRoute[trip.index - 1]
+        : trip.returnRoute ? trip.returnRoute[trip.index - 1]
+        : trip.sellerRoute[trip.index + 1];
+      handleFloorChange(destination, now, previous);
     } else if (now - state.lastPathAt >= config.repathMs ||
       now - state.lastProgressAt >= config.repathMs) {
       goToWaypoint(destination);
@@ -7062,6 +7135,11 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
       verificationLastRestore: state.verificationLastRestore,
       verificationLastRestoreAt: state.verificationLastRestoreAt,
       sellerTrip: getSellerTripStatus(),
+      sellerRouteInfo: (() => {
+        const sr = config.sellerPresetName ? getValidatedSellerRoute(false) : null;
+        return sr ? { valid:true, recordedDirection:sr.recordedDirection,
+          huntWaypointIndex:sr.huntWaypointIndex, sellerPresetName:sr.sellerPresetName } : {valid:false};
+      })(),
       homeRouteValid: !!(config.homePresetName && getValidatedHomeRoute(false)),
       freeCapacity: Number(bot.getPlayerSnapshot?.()?.capacity) || null,
     };
@@ -7133,6 +7211,7 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     beginSellerTrip,
     goHome,
     goToHunt,
+    goToHuntFromSeller,
     getSellerTripStatus,
     getSellerEscortWaypoints,
     resumeFromSeller,
@@ -10767,14 +10846,14 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
               <label class="mb-toggle"><input type="checkbox" id="minibia-bot-seller-enabled"/><span>Return to seller on low capacity</span></label>
               <label class="mb-field" for="minibia-bot-seller-cap"><span class="mb-field-label">Free capacity threshold (oz)</span>
                 <input id="minibia-bot-seller-cap" type="number" min="1" max="10000" value="50" /></label>
-              <label class="mb-field" for="minibia-bot-seller-route"><span class="mb-field-label">Seller route (saved preset)</span>
+              <label class="mb-field" for="minibia-bot-seller-route"><span class="mb-field-label">Seller route (Shanar ↔ Hunt, either direction)</span>
                 <select id="minibia-bot-seller-route"><option value="">Select a route</option></select></label>
               <label class="mb-field" for="minibia-bot-seller-return-route"><span class="mb-field-label">Return route (optional: NPC to hunt)</span>
                 <select id="minibia-bot-seller-return-route"><option value="">Reverse seller route</option></select></label>
               <label class="mb-toggle"><input type="checkbox" id="minibia-bot-seller-fight-outbound"/><span>Fight while going to seller</span></label>
               <label class="mb-toggle"><input type="checkbox" id="minibia-bot-seller-fight-return"/><span>Fight while returning to hunt</span></label>
               <div class="mb-small-note">Escort combat is available only if Auto Attack was running when the trip started. Waypoints pause while fighting. Both options start OFF. Auto Heal remains independent.</div>
-              <div class="mb-small-note">Seller route: first hunt waypoint → NPC. Optional Return Route: NPC → first hunt waypoint. Include every stair transition deliberately.</div>
+              <div class="mb-small-note">Seller route may be recorded Shanar → hunt OR hunt → Shanar. One endpoint must exactly match a waypoint in the repeatable hunt circuit. Direction is detected automatically. Record stairs and shovel/rope transitions in both directions when possible.</div>
               <div class="mb-label">Auto Sell (experimental; OFF by default)</div>
               <label class="mb-toggle"><input type="checkbox" id="minibia-bot-auto-sell-enabled"/><span>Enable verified NPC sales</span></label>
               <label class="mb-field"><span class="mb-field-label">NPC name (exact)</span>
@@ -10861,6 +10940,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
       <div class="mb-quick-head"><strong>QUICK HUNT</strong><span class="mb-quick-hint">One click to start your saved hunt</span></div>
       <label class="mb-quick-route">Hunt route <select id="minibia-bot-quick-route"></select></label>
       <label class="mb-quick-route">Home route (Hunt WP1 → marked Home) <select id="minibia-bot-quick-home-route"></select></label>
+      <label class="mb-quick-route">Seller route (Shanar ↔ Hunt, either direction) <select id="minibia-bot-quick-seller-route"></select></label>
       <div class="mb-quick-settings">
         <label class="mb-toggle"><input id="minibia-bot-quick-attack" type="checkbox"/><span>Auto Attack</span></label>
         <label class="mb-toggle"><input id="minibia-bot-quick-melee" type="checkbox"/><span>Melee Mode</span></label>
@@ -10888,14 +10968,15 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
       <div class="mb-small-note">After each successful spell, ML Trainer selects a fresh random delay between Min and Max. Mana, HP, food and game cooldown can delay casting further.</div>
       <div class="mb-quick-summary" id="minibia-bot-quick-summary">Quick toggles control the same settings as advanced panels; START HUNT starts the selected route.</div>
       <div class="mb-quick-actions">
-        <button id="minibia-bot-quick-go-hunt" type="button">GO HUNT</button>
+        <button id="minibia-bot-quick-go-hunt" type="button">GO HUNT (HOME)</button>
+        <button id="minibia-bot-quick-go-hunt-seller" type="button">SHANAR → HUNT</button>
         <button id="minibia-bot-quick-go-home" type="button">GO HOME</button>
         <button id="minibia-bot-quick-start" type="button">START HUNT</button>
         <button id="minibia-bot-quick-stop" type="button">STOP HUNT</button>
         <button id="minibia-bot-quick-alarm" type="button">TEST ALARM</button>
         <button id="minibia-bot-quick-resume-notice" type="button">RESTORE AFTER CAPTCHA</button>
       </div>
-      <div class="mb-small-note">GO HOME requires an explicit route from hunt WP1 to marked Home. GO HUNT uses the reverse route. GM / notice alarm holds movement, keeps stationary attack &amp; Auto Heal. Travel fight works only when Auto Attack was already running.</div>
+      <div class="mb-small-note">SHANAR → HUNT requires standing by your recorded Shanar endpoint and a saved hunt route with an exactly matching waypoint. GO HOME / GO HUNT (HOME) remain independent. GM / notice alarms keep stationary attack &amp; Auto Heal.</div>
       <div class="mb-small-note" id="minibia-bot-quick-status">Stopped. Toggles apply immediately; START HUNT starts Cave Bot.</div>`;
     panel.querySelector(".mb-body")?.prepend(quickBar);
     function foldSections(columnClass, titleFor) {
@@ -11110,6 +11191,8 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     const quickRoute = quickBar.querySelector('#minibia-bot-quick-route');
     const quickHomeRoute = quickBar.querySelector('#minibia-bot-quick-home-route');
     const quickGoHunt = quickBar.querySelector('#minibia-bot-quick-go-hunt');
+    const quickGoHuntSeller = quickBar.querySelector('#minibia-bot-quick-go-hunt-seller');
+    const quickSellerRoute = quickBar.querySelector('#minibia-bot-quick-seller-route');
     const quickGoHome = quickBar.querySelector('#minibia-bot-quick-go-home');
     const quickAlarm = quickBar.querySelector('#minibia-bot-quick-alarm');
     const quickResumeNotice = quickBar.querySelector('#minibia-bot-quick-resume-notice');
@@ -11200,11 +11283,21 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
         `Priority ${caveConfig.prioritizeMonsters?'ON':'OFF'} · `+
         `Random ${caveConfig.randomizeMovement?'ON':'OFF'} · Route ${caveConfig.routeTraversalMode==='loop'?'Circular':'Out/back'} · Entry once ${c?.entryWaypointCount||0} WPs · `+
         `Smart chat alarm ${bot.panic?.config?.smartChatAlertEnabled?'ON':'OFF'} · Nearby player alarm ${bot.panic?.config?.unknownPlayerSoundAlertEnabled?'ON':'OFF'} · GM alarm ${caveConfig.pauseOnModeratorMessage?'ON':'OFF'} · Notice alarm ${caveConfig.pauseWaypointsOnVerification?'ON':'OFF'} · `+
-        `Travel fight ${caveConfig.travelFight?'ON':'OFF'} · Home ${c?.homeRouteValid?'ready':'route needed'}. Settings synced.`;
+        `Travel fight ${caveConfig.travelFight?'ON':'OFF'} · Home ${c?.homeRouteValid?'ready':'route needed'} · `+
+        `Seller ${c?.sellerRouteInfo?.valid ? (c.sellerRouteInfo.recordedDirection+' (WP'+(c.sellerRouteInfo.huntWaypointIndex+1)+')') : 'route needed'}. Settings synced.`;
     }
     function refreshQuickRoutes() {
       const names=bot.cave?.getPresetNames?.()||[];
       const homeSelected=bot.cave?.config?.homePresetName||'';
+      const sellerSelected=bot.cave?.config?.sellerPresetName||'';
+      if (quickSellerRoute.options.length!==names.length+1 ||
+          names.some((n,i)=>quickSellerRoute.options[i+1]?.value!==n)) {
+        quickSellerRoute.replaceChildren();
+        const emptySeller=document.createElement('option');
+        emptySeller.value='';emptySeller.textContent='Select Shanar route';quickSellerRoute.append(emptySeller);
+        for(const name of names){const option=document.createElement('option');option.value=name;option.textContent=name;quickSellerRoute.append(option);}
+      }
+      if(document.activeElement!==quickSellerRoute) quickSellerRoute.value=names.includes(sellerSelected)?sellerSelected:'';
       if (quickHomeRoute.options.length!==names.length+1 ||
           names.some((n,i)=>quickHomeRoute.options[i+1]?.value!==n)) {
         quickHomeRoute.replaceChildren();
@@ -11239,6 +11332,10 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     quickHomeRoute.addEventListener('change',()=>{
       bot.cave?.updateConfig?.({homePresetName:quickHomeRoute.value});refreshQuickSummary();
     });
+    quickSellerRoute.addEventListener('change',()=>{
+      bot.cave?.updateConfig?.({sellerPresetName:quickSellerRoute.value});
+      refreshSellerRouteOptions();refreshQuickSummary();
+    });
     quickGoHome.addEventListener('click',()=>{
       quickStatus.textContent=bot.cave?.goHome?.() ? 'GO HOME started' :
         'GO HOME failed: START HUNT first, save/select route from hunt WP1 to marked Home, and check alerts';
@@ -11246,8 +11343,14 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     quickGoHunt.addEventListener('click',()=>{
       if(!bot.cave?.status?.()?.running && quickRoute.value)
         bot.cave?.loadPreset?.(quickRoute.value);
-      quickStatus.textContent=bot.cave?.goToHunt?.() ? 'GO HUNT started' :
-        'GO HUNT failed: need completed GO HOME or stand on marked Home with valid recorded route';
+      quickStatus.textContent=bot.cave?.goToHunt?.() ? 'GO HUNT from Home started' :
+        'GO HUNT from Home failed: need completed GO HOME or stand on marked Home with valid recorded route';
+    });
+    quickGoHuntSeller.addEventListener('click',()=>{
+      if(!bot.cave?.status?.()?.running && quickRoute.value)
+        bot.cave?.loadPreset?.(quickRoute.value);
+      quickStatus.textContent=bot.cave?.goToHuntFromSeller?.() ? 'SHANAR → HUNT started' :
+        'SHANAR → HUNT failed: select hunt route + seller preset, stand near recorded Shanar endpoint, and keep Cave Bot stopped';
     });
     quickAlarm.addEventListener('click',()=>{
       bot.unlockAudio?.();bot.playAlarm?.();quickStatus.textContent='Alarm test requested (check browser sound)';
@@ -11753,9 +11856,13 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     }
     function refreshSellerStatus() {
       const trip = bot.cave?.getSellerTripStatus?.();
-      if (sellerStatusLabel) sellerStatusLabel.textContent = trip
-        ? `Seller return: ${trip.phase}`
-        : `Seller return: ${bot.cave?.config?.autoSellerVisit ? "armed" : "off"}`;
+      if (sellerStatusLabel) {
+        const routeInfo=bot.cave?.status?.()?.sellerRouteInfo;
+        sellerStatusLabel.textContent = trip
+          ? `Seller return: ${trip.phase} · recorded ${trip.recordedDirection}`
+          : `Seller return: ${bot.cave?.config?.autoSellerVisit ? "armed" : "off"} · `+
+            (routeInfo?.valid ? `route ${routeInfo.recordedDirection} (hunt WP${routeInfo.huntWaypointIndex+1})` : 'seller route not connected');
+      }
       if (sellerConfirmButton) sellerConfirmButton.disabled = trip?.phase !== "waiting-at-seller";
       if (sellerAbortButton) sellerAbortButton.disabled = !trip;
     }
