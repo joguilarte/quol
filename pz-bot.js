@@ -9267,15 +9267,40 @@ window.__minibiaBotBundle.installAutoSellModule = function installAutoSellModule
       });
       return true;
     }
-    if (sawUnavailable && state.sold > 0 && config.autoReturnAfterSale) {
+    if (sawUnavailable && state.sold > 0) {
+      // Only close the NPC trade modal after every allowed item has been
+      // inspected and at least one server-confirmed inventory decrement exists.
+      // The native close() also ends the NPC conversation (bye); do NOT call
+      // ModalManager.handleConfirm(), which would issue a second sale.
+      const manager = window.gameClient?.interface?.modalManager;
+      if (manager?.isOpened?.()) {
+        const ownModal = getCurrentModal();
+        if (!ownModal || manager.__openedModal !== ownModal) {
+          pause("Sale confirmed, but trade window identity is uncertain; close it manually");
+          return false;
+        }
+        try {
+          manager.close();
+        } catch (error) {
+          pause("Sale confirmed, but NPC trade close failed: " + String(error?.message || error));
+          return false;
+        }
+        if (manager.isOpened?.()) {
+          pause("Sale confirmed, but NPC trade window stayed open; close it manually");
+          return false;
+        }
+      }
       state.phase = "completed";
       if (state.manualSession) {
-        state.manualSession = false; // manual test never starts a return trip
-      } else {
-        bot.cave?.resumeFromSeller?.();
+        // Sell now is a manual test; it never triggers an unrequested trip.
+        state.manualSession = false;
+      } else if (config.autoReturnAfterSale) {
+        if (!bot.cave?.resumeFromSeller?.()) {
+          pause("Sale completed and trade closed, but return could not start; use Confirm Sale & Return");
+        }
       }
     } else if (sawUnavailable) {
-      state.phase = state.sold > 0 ? "completed" : "no-matching-items";
+      state.phase = "no-matching-items";
     }
     return false;
   }
