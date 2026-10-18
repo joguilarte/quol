@@ -9190,17 +9190,26 @@ window.__minibiaBotBundle.installAutoSellModule = function installAutoSellModule
         }
       }
       if (now - state.lastActionAt < 1200) return false;
-      const offerSlot = Array.from(modal.element?.querySelectorAll?.(".offers .offer-slot") || []);
-      const filteredIndex = modal.__offers.filter((o,i)=>i < index && o.type === "buy").length;
-      const slot = offerSlot[filteredIndex];
+      // OfferModal changes a selected canvas from "slot offer-slot" to
+      // "slot selected"; querying only .offer-slot drops the previously
+      // selected item and shifts every subsequent trade offer by one.
+      // All offers, including the selected one, retain the .slot class.
+      const offerSlots = Array.from(modal.element?.querySelectorAll?.(".offers > canvas.slot") || []);
+      const visibleOffers = modal.__offers.filter((o) => o?.type === "buy");
+      const filteredIndex = modal.__offers.filter((o,i)=>i < index && o?.type === "buy").length;
+      const slot = offerSlots[filteredIndex];
       const slider = document.getElementById("buy-count");
-      if (!slot || !slider || typeof modal.handleConfirm !== "function") {
-        pause("NPC trade interface changed; manual sale required");
+      if (modal.__offerType !== "buy" || offerSlots.length !== visibleOffers.length ||
+          !slot || !slider || typeof modal.handleConfirm !== "function") {
+        pause("NPC sell offers changed; manual sale required");
         return false;
       }
       slot.click();
-      if (modal.__selectedOffer !== index) {
-        pause("Could not verify selected NPC offer");
+      const selected = modal.__offers[modal.__selectedOffer];
+      if (modal.__offerType !== "buy" || modal.__selectedOffer !== index ||
+          selected?.type !== "buy" || Number(selected?.id) !== Number(offer.id) ||
+          norm(selected?.name) !== norm(offer.name)) {
+        pause("Could not verify selected NPC sell offer");
         return false;
       }
       const amount = Math.min(qty, 100, Math.max(1, Number(slider.max) || 100));
