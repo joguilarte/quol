@@ -1505,10 +1505,10 @@ window.__minibiaBotBundle.installPanicModule = function installPanicModule(bot) 
     lastUnknownPlayerAlarm: null,
     smartChatSeeded: false,
     smartChatSeen: new Set(),
-    smartChatBySender: new Map(),
     lastSmartChatAlarmAt: 0,
     lastSmartChatScanAt: 0,
     lastSmartChatAlarm: null,
+    pendingSmartChatAlarm: null,
   };
 
   const config = Object.assign(
@@ -1521,7 +1521,7 @@ window.__minibiaBotBundle.installPanicModule = function installPanicModule(bot) 
       returnRetryCooldownMs: 2000,
       unknownPlayerEnabled: false,
       unknownPlayerSoundAlertEnabled: false,
-      smartChatAlertEnabled: false, // PM and targeted Default chat: sound only
+      smartChatAlertEnabled: false, // ALL new Default and private messages: sound only
       healthLossEnabled: false,
       trustedNames: [],
       gameMasterNames: [],
@@ -1904,9 +1904,9 @@ window.__minibiaBotBundle.installPanicModule = function installPanicModule(bot) 
     bot.playAlarm?.();
   }
 
-  // Smart chat alert: report a message directed to this character, not every player
-  // entering the screen. Uses Talk's read-only chat parser; does not require Gemini.
-  // In-game moderator/CAPTCHA alerts remain independent of this advisory detector.
+  // Chat activity alert. Warn on ANY new Default or private message by another
+  // character, regardless of whom it addresses. Does not control Gemini replies.
+  // Older chat and spell incantations are intentionally ignored.
   function foldChatText(value) {
     return String(value || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '')
       .toLowerCase().replace(/\s+/g, ' ').trim();
@@ -1920,24 +1920,8 @@ window.__minibiaBotBundle.installPanicModule = function installPanicModule(bot) 
   function resetSmartChatScan() {
     state.smartChatSeeded = false;
     state.smartChatSeen.clear();
-    state.smartChatBySender.clear();
     state.lastSmartChatScanAt = 0;
-  }
-
-  function isAddressedInDefault(body) {
-    const msg = foldChatText(body);
-    const self = foldChatText(bot.getPlayerName?.() || window.gameClient?.player?.name || '');
-    // Word-boundary instead of substring: 'ana' must not match 'banana'.
-    const mentionsMe = self.length > 1 && msg.split(/[^\p{L}\p{N}]+/u).includes(self);
-    if (mentionsMe) return 'name-mention';
-    // Short, explicit questions directed at someone, independent of their language.
-    // Ordinary public conversation should NOT make an alarm.
-    const checkIns = [
-      /\b(?:estas? ahi|sigues? ahi|hay alguien|me escuchas|me lees|me respondes|responde|contesta|eres (?:un )?bot|sos (?:un )?bot|est[áa]s afk)\b/,
-      /\b(?:are you there|you there|u there|anyone there|can you hear me|can you read me|answer me|reply to me|are you (?:a )?bot|r u a bot|you afk)\b/,
-      /\b(?:ta ai|esta ai|vc ta ai|voce esta ai|responde ai)\b/,
-    ];
-    return checkIns.some((pattern) => pattern.test(msg)) ? 'direct-question' : null;
+    state.pendingSmartChatAlarm = null;
   }
 
   function checkSmartChatAlerts() {
@@ -1945,52 +1929,48 @@ window.__minibiaBotBundle.installPanicModule = function installPanicModule(bot) 
     const scanAt = Date.now();
     if (scanAt - state.lastSmartChatScanAt < 1000) return;
     state.lastSmartChatScanAt = scanAt;
-    // Read-only; Talk may be switched OFF and this detector still works.
+    // Read-only; auto-reply and Gemini may remain switched OFF.
     const messages = bot.talk?.getChatMessages?.();
     if (!Array.isArray(messages)) return;
     if (!state.smartChatSeeded) {
-      // Existing chat backlog is not a new arrival.
       messages.slice(-300).forEach((msg) => state.smartChatSeen.add(smartChatSignature(msg)));
       state.smartChatSeeded = true;
       return;
     }
-    const trusted = new Set(getTrustedNames());
     const me = foldChatText(bot.getPlayerName?.() || window.gameClient?.player?.name || '');
     const now = Date.now();
+    let nextAlarm = null;
     for (const message of messages.slice(-300)) {
       const key = smartChatSignature(message);
       if (state.smartChatSeen.has(key)) continue;
       state.smartChatSeen.add(key);
       const sender = foldChatText(message?.sender);
       const body = String(message?.body || '').trim();
-      if (!sender || !body || sender === me || sender === 'you' || trusted.has(sender)) continue;
+      if (!sender || !body || sender === me || sender === 'you') continue;
       if (bot.isRecentSentChat?.(body, 20000)) continue;
       if (bot.talk?.isSpellIncantation?.(body)) continue;
       const monsterType = window.CONST?.TYPES?.MONSTER;
       if (monsterType != null && message?.senderType === monsterType) continue;
-      if (bot.cave?.status?.()?.config?.pauseOnModeratorMessage &&
-          bot.cave?.isModeratorChatMessage?.(message)) continue; // already sounds GM alarm
       const isPrivate = message.privateMessage === true;
       if (!isPrivate && message.channelName !== 'Default') continue;
-      const reason = isPrivate ? 'private-message' : isAddressedInDefault(body);
-      if (!reason) continue;
-      if (now - (state.smartChatBySender.get(sender) || 0) < 10 * 60 * 1000) continue;
-      if (now - state.lastSmartChatAlarmAt < 10 * 1000) continue;
-      state.smartChatBySender.set(sender, now);
+      if (bot.cave?.status?.()?.config?.pauseOnModeratorMessage &&
+          bot.cave?.isModeratorChatMessage?.(message)) continue; // GM warning already sounds
+      // One sound per scan at most, even if several messages arrive together.
+      nextAlarm = { at: now, sender: String(message.sender),
+        channel: isPrivate ? 'PM' : 'Default', reason: 'new-chat-message' };
+    }
+    // Merge rapid messages into a pending beep rather than silently dropping
+    // a message that happens during the audio cooldown. Sound-only, no stops.
+    if (nextAlarm) state.pendingSmartChatAlarm = nextAlarm;
+    if (state.pendingSmartChatAlarm && now - state.lastSmartChatAlarmAt >= 3000) {
       state.lastSmartChatAlarmAt = now;
-      state.lastSmartChatAlarm = {
-        at: now, sender: String(message.sender),
-        channel: isPrivate ? 'PM' : 'Default', reason,
-      };
-      // Deliberately do not log PM content or affect any automation state.
-      bot.log('smart chat: sound-only alert', state.lastSmartChatAlarm);
+      state.lastSmartChatAlarm = state.pendingSmartChatAlarm;
+      state.pendingSmartChatAlarm = null;
+      bot.log('chat activity: sound-only alert', state.lastSmartChatAlarm);
       bot.playAlarm?.();
     }
     if (state.smartChatSeen.size > 1600) {
       state.smartChatSeen = new Set(Array.from(state.smartChatSeen).slice(-800));
-    }
-    for (const [name, at] of state.smartChatBySender) {
-      if (now - at > 10 * 60 * 1000) state.smartChatBySender.delete(name);
     }
   }
 
@@ -4401,6 +4381,9 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     /\bloose stone pile\b/i,
     /\bgravel pile\b/i,
     /\bdirt pile\b/i,
+    /\bcovered hole\b/i,
+    /\bsealed hole\b/i,
+    /\bstone heap\b/i,
   ];
   const state = {
     running: false,
@@ -4460,6 +4443,7 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
       autoRecoverWaypoints: true,
       waypointTolerance: 0,
       allowFloorTransitions: false, // explicit opt-in for intentional cross-floor waypoints
+      routeTraversalMode: "pingpong", // follow 1 -> 2 -> 3 -> 2 -> 1 by default
       prioritizeMonsters: false, // opt-in: pause waypoint navigation during fights
       randomizeMovement: false, // opt-in: rare locally validated lateral detours between hunt waypoints
       limitChaseToRoute: false, // opt-in: do not chase mobs outside recorded route area
@@ -4483,6 +4467,7 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     bot.storage.get(configStorageKey, {})
   );
   config.tickMs = 500;
+  config.routeTraversalMode = config.routeTraversalMode === "loop" ? "loop" : "pingpong";
   config.allowFloorTransitions = config.allowFloorTransitions === true;
   config.prioritizeMonsters = config.prioritizeMonsters === true;
   config.randomizeMovement = config.randomizeMovement === true;
@@ -5086,7 +5071,13 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
       return true;
     }
 
-    return Array.isArray(tile.items) && tile.items.some((item) => isFloorChangeThing(item));
+    if (Array.isArray(tile.items) && tile.items.some((item) => isFloorChangeThing(item))) {
+      return true;
+    }
+    // Some Minibia stairs and opened holes only expose a display name, not
+    // `properties.floorchange`. Only the deliberate cross-floor handler may
+    // use them; Safe Navigation still treats them as blocked for normal walks.
+    return isStairsTile(tile) || isHoleTile(tile);
   }
 
   function getTileThings(tile) {
@@ -5122,7 +5113,8 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
   }
 
   function isStairsTile(tile) {
-    return tileHasNamedThing(tile, "stairs");
+    return getTileThings(tile).some((thing) =>
+      /\b(stairs?|staircase|ramp)\b/i.test(getThingName(thing)));
   }
 
   function isHoleTile(tile) {
@@ -5653,36 +5645,40 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
   }
 
   function findAdjacentWalkablePosition(targetPosition, playerPosition) {
-    if (!targetPosition || !playerPosition) {
-      return null;
-    }
-
+    if (!targetPosition || !playerPosition || !bot.safeNavigation?.plan ||
+        playerPosition.z !== targetPosition.z) return null;
+    // The Minibia tiles do not consistently implement `isWalkable()`.
+    // Require a reachable same-floor approach checked by Safe Navigation,
+    // rather than selecting an adjacent tile based on an unavailable method.
     const offsets = [
       { x: 0, y: -1 }, { x: 1, y: 0 }, { x: 0, y: 1 }, { x: -1, y: 0 },
       { x: -1, y: -1 }, { x: 1, y: -1 }, { x: -1, y: 1 }, { x: 1, y: 1 },
     ];
-
-    offsets.sort((a, b) => {
-      const da = Math.abs(targetPosition.x + a.x - playerPosition.x) +
-        Math.abs(targetPosition.y + a.y - playerPosition.y);
-      const db = Math.abs(targetPosition.x + b.x - playerPosition.x) +
-        Math.abs(targetPosition.y + b.y - playerPosition.y);
-      return da - db;
+    const candidates = offsets.map((offset) => ({
+      x: targetPosition.x + offset.x,
+      y: targetPosition.y + offset.y,
+      z: targetPosition.z,
+    })).sort((a, b) => {
+      const distanceA = getDistance(playerPosition, a);
+      const distanceB = getDistance(playerPosition, b);
+      const cardinalA = Math.abs(a.x-targetPosition.x)+Math.abs(a.y-targetPosition.y);
+      const cardinalB = Math.abs(b.x-targetPosition.x)+Math.abs(b.y-targetPosition.y);
+      return distanceA-distanceB || cardinalA-cardinalB;
     });
-
-    for (const offset of offsets) {
-      const position = new Position(
-        targetPosition.x + offset.x,
-        targetPosition.y + offset.y,
-        targetPosition.z
-      );
-      const tile = window.gameClient?.world?.getTileFromWorldPosition?.(position);
-      if (tile?.isWalkable?.()) {
-        return normalizePosition(position);
-      }
+    let partial = null;
+    let bestProgress = 0;
+    for (const candidate of candidates) {
+      if (isSameTile(candidate, playerPosition)) return candidate;
+      const path = bot.safeNavigation.plan(playerPosition, candidate,
+        { exactOnly: false, maxSteps: 28, maxNodes: 1200 });
+      if (path?.ok && path.exact) return candidate;
+      const progress = path?.ok ? getDistance(playerPosition, candidate) -
+        getDistance(path.destination, candidate) : 0;
+      if (progress > bestProgress) { bestProgress = progress; partial = candidate; }
     }
-
-    return null;
+    // For a long approach, allow one locally validated partial segment.
+    // Do not enter the transition tile; the next tick replans safely.
+    return partial;
   }
 
   function isRopeItem(item) {
@@ -5751,10 +5747,15 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
 
     const useWith = window.gameClient?.mouse?.__handleItemUseWith;
     if (typeof useWith !== 'function') return false;
-    useWith.call(window.gameClient.mouse,
-      { which: tool.which, index: tool.index },
-      { which: targetTile, index: 0xFF }
-    );
+    try {
+      useWith.call(window.gameClient.mouse,
+        { which: tool.which, index: tool.index },
+        { which: targetTile, index: 0xFF }
+      );
+    } catch (error) {
+      bot.log('cave waypoint tool failed', error?.message || error);
+      return false;
+    }
     state.lastStairsUseAt = now;
     state.lastPathAt = now;
     markPendingTransitionSource(targetPosition);
@@ -5802,16 +5803,22 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     if (config.useWaypointTools && waypoint?.z < position.z && isRopeTargetTile(targetTile)) {
       return useRopeOnTile(targetTile, targetPosition, now);
     }
-
-    if (!isFloorChangeTile(targetTile)) {
-      if (config.useWaypointTools && waypoint?.z > position.z && isShovelTargetTile(targetTile)) {
-        return useShovelOnTile(targetTile, targetPosition, now);
-      }
-      return false;
+    // Attempt the shovel before a floorchange walk: some sealed piles expose
+    // floorchange metadata while still closed. After opening, the next tick
+    // can step onto the new hole without shoveling again.
+    if (config.useWaypointTools && waypoint?.z > position.z && isShovelTargetTile(targetTile)) {
+      return useShovelOnTile(targetTile, targetPosition, now);
     }
+    if (!isFloorChangeTile(targetTile)) return false;
 
     if (isLadderTile(targetTile)) {
-      window.gameClient?.mouse?.use?.({ which: targetTile, index: 0xFF });
+      if (!isBesideOrSameTile(position, targetPosition)) {
+        const adjacent = findAdjacentWalkablePosition(targetPosition, position);
+        return adjacent ? goToPosition(adjacent) : false;
+      }
+      if (typeof window.gameClient?.mouse?.use !== 'function') return false;
+      bot.safeNavigation?.cancel?.('cave');
+      window.gameClient.mouse.use({ which: targetTile, index: 0xFF });
       state.lastStairsUseAt = now;
       state.lastPathAt = now;
       markPendingTransitionSource(targetPosition);
@@ -5866,45 +5873,78 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     return true;
   }
 
-  function handleFloorChange(waypoint, now = Date.now()) {
+  function getRecordedTransitionAnchor(position, waypoint, override = null) {
+    if (override && override.z === position?.z && waypoint?.z !== position.z)
+      return normalizePosition(override);
+    // On a route crossing floors, the waypoint immediately preceding the
+    // cross-floor destination is the *only* authorized area for discovery.
+    const lastIndex = state.currentIndex - state.direction;
+    const previous = route[lastIndex];
+    if (previous && previous.z === position?.z && waypoint?.z !== position.z)
+      return previous;
+    return null;
+  }
+
+  function findRecordedTransitionTile(anchor, waypoint) {
+    if (!anchor || !waypoint) return null;
+    const exactTile = getTileAt(anchor);
+    if (isTransitionCandidateTile(exactTile, waypoint, anchor))
+      return { tile: exactTile, position: anchor };
+    // The recorded point may be ONE square beside the stairs or stone.
+    // Multiple candidates are ambiguous: stop rather than enter a random one.
+    const nearby = getNearbyTransitionTiles(anchor, waypoint, 1)
+      .filter((entry) => Math.max(
+        Math.abs(entry.position.x-anchor.x), Math.abs(entry.position.y-anchor.y)
+      ) <= 1);
+    return nearby.length === 1 ? nearby[0] : null;
+  }
+
+  function warnBlockedFloorChange(waypoint, reason, now) {
+    state.lastRoutePathError = reason;
+    state.lastRoutePathErrorAt = now;
+    if (now - state.lastRouteRecoveryWarningAt >= 8000) {
+      state.lastRouteRecoveryWarningAt = now;
+      bot.log('cave floor transition waiting', { waypoint, reason });
+    }
+  }
+
+  function handleFloorChange(waypoint, now = Date.now(), explicitAnchor = null) {
     if (!config.allowFloorTransitions) return false;
     const position = normalizePosition(bot.getPlayerPosition());
-    if (!position || !waypoint || position.z === waypoint.z) {
-      return false;
-    }
+    if (!position || !waypoint || position.z === waypoint.z) return false;
 
-    // Prefer a recorded transition over a visually nearby staircase. This is
-    // essential when starting the hunt off-route near multiple floor changes.
-    const knownTransition = findBestKnownTransition(position, waypoint);
+    const recordedAnchor = getRecordedTransitionAnchor(position, waypoint, explicitAnchor);
+    const previouslyLearned = findBestKnownTransition(position, waypoint);
+    const knownTransition = previouslyLearned &&
+      (!recordedAnchor || Math.max(
+        Math.abs(previouslyLearned.from.x - recordedAnchor.x),
+        Math.abs(previouslyLearned.from.y - recordedAnchor.y)
+      ) <= 2) ? previouslyLearned : null;
+    // A learned action takes precedence, but the destination must be a real
+    // visible tile on our current floor; never navigate to a guessed stair.
     if (knownTransition) {
-      const target = {
-        tile: getTileAt(knownTransition.from),
-        position: knownTransition.from,
-      };
-      const moved = useFloorChangeTile(target, waypoint, now);
-      if (moved) {
-        bot.log("cave using learned floor transition", {
-          from: knownTransition.from,
-          to: knownTransition.to,
-          waypoint,
-        });
+      const target = { tile: getTileAt(knownTransition.from), position: knownTransition.from };
+      if (target.tile && useFloorChangeTile(target, waypoint, now)) {
+        state.lastRoutePathError = null;
         return true;
       }
+      // Permit the explicit recorded anchor if the learned tile is not loaded
+      // (or became unusable), but do not search arbitrary nearby staircases.
+    }
 
-      // Do not substitute a different nearby staircase if the recorded one
-      // cannot be approached; preserve the current floor instead.
-      if (now - state.lastRouteRecoveryWarningAt >= 8000) {
-        state.lastRouteRecoveryWarningAt = now;
-        bot.log("cave recorded transition unavailable; no fallback to other stairs", {
-          from: knownTransition.from,
-          to: knownTransition.to,
-          waypoint,
-        });
-      }
+    const recordedTarget = findRecordedTransitionTile(recordedAnchor, waypoint);
+    if (recordedTarget && useFloorChangeTile(recordedTarget, waypoint, now)) {
+      state.lastRoutePathError = null;
+      return true;
+    }
+    if (recordedAnchor) {
+      warnBlockedFloorChange(waypoint,
+        'recorded transition missing/blocked: put a waypoint ON or BESIDE the stairs/stone', now);
       return false;
     }
-    // No learned entrance: permit discovery only right next to the character.
-    // Never cross the map toward an arbitrary visible floor transition.
+
+    // Compatibility for a route beginning beside a shovel/rope spot without
+    // a learned transition. Never automatically enter unrecorded stairs.
     const pending = state.pendingTransitionSource;
     const visibleCandidate = findNearbyTransitionTile(position, waypoint, (entry) => {
       const recentlyShoveled = pending &&
@@ -5916,24 +5956,13 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
       );
       return toolEntrance || recentlyShoveled;
     });
-    // Unlearned ladders and stairs remain blocked, even with floor changes ON.
-    // A freshly shoveled hole is allowed only at the exact same target tile.
-    if (visibleCandidate && isBesideOrSameTile(position, visibleCandidate.position)) {
-      const moved = useFloorChangeTile(visibleCandidate, waypoint, now);
-      if (moved) {
-        bot.log("cave using adjacent visible floor-change tile", {
-          tileX: visibleCandidate.position.x,
-          tileY: visibleCandidate.position.y,
-          tileZ: visibleCandidate.position.z,
-          targetZ: waypoint.z,
-        });
-        return true;
-      }
+    if (visibleCandidate && isBesideOrSameTile(position, visibleCandidate.position) &&
+        useFloorChangeTile(visibleCandidate, waypoint, now)) {
+      state.lastRoutePathError = null;
+      return true;
     }
-    if (now - state.lastRouteRecoveryWarningAt >= 8000) {
-      state.lastRouteRecoveryWarningAt = now;
-      bot.log("cave requires a learned or adjacent transition; no speculative stairs", { waypoint });
-    }
+    warnBlockedFloorChange(waypoint,
+      'no learned or route-marked stairs/stone on this floor', now);
     return false;
   }
 
@@ -5946,23 +5975,29 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
       return route[0];
     }
 
-    let nextIndex = state.currentIndex + state.direction;
+    // Recorded entry waypoints are traversed only once. The hunt section
+    // then either reverses along the recorded path (default) or loops.
+    const cycleStart = entryWaypointCount > 0 && state.entranceCompleted ? entryWaypointCount : 0;
+    let nextIndex = state.currentIndex + (config.routeTraversalMode === "loop" ? 1 : state.direction);
     if (entryWaypointCount > 0 && !state.entranceCompleted && nextIndex >= entryWaypointCount) {
       state.entranceCompleted = true;
       state.direction = 1;
-      bot.log("cave entrance completed; looping hunt-only segment", { entryWaypoints: entryWaypointCount });
+      bot.log("cave entrance completed; cycling hunt-only segment", { entryWaypoints: entryWaypointCount });
     }
-    const cycleStart = entryWaypointCount > 0 && state.entranceCompleted ? entryWaypointCount : 0;
+    const huntStart = entryWaypointCount > 0 && state.entranceCompleted ? entryWaypointCount : cycleStart;
 
-    if (nextIndex >= route.length) {
+    if (config.routeTraversalMode === "loop") {
+      state.direction = 1;
+      if (nextIndex >= route.length) nextIndex = huntStart;
+    } else if (nextIndex >= route.length) {
       state.direction = -1;
       nextIndex = route.length - 2;
-    } else if (nextIndex < cycleStart) {
+    } else if (nextIndex < huntStart) {
       state.direction = 1;
-      nextIndex = cycleStart + 1;
+      nextIndex = huntStart + 1;
     }
 
-    state.currentIndex = Math.max(cycleStart, Math.min(route.length - 1, nextIndex));
+    state.currentIndex = Math.max(huntStart, Math.min(route.length - 1, nextIndex));
 
     const nextWaypoint = getCurrentWaypoint();
     bot.log("cave advanced waypoint", {
@@ -6752,6 +6787,20 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
         return;
       }
 
+      // A floor-change waypoint is deliberately not walkable by SafeNavigation.
+      // If it directly precedes a waypoint on another floor, dispatch the
+      // deliberate transition instead of indefinitely pathing to its tile.
+      const nextTransitionIndex = state.currentIndex + state.direction;
+      const nextTransitionWaypoint = route[nextTransitionIndex];
+      const waypointTile = position?.z === waypoint.z ? getTileAt(waypoint) : null;
+      if (config.allowFloorTransitions && position && waypointTile &&
+          nextTransitionWaypoint && nextTransitionWaypoint.z !== position.z &&
+          isTransitionCandidateTile(waypointTile, nextTransitionWaypoint, position)) {
+        state.currentIndex = nextTransitionIndex;
+        handleFloorChange(nextTransitionWaypoint, now, waypoint);
+        return;
+      }
+
       if (position && waypoint.z !== position.z) {
         if (!config.allowFloorTransitions) {
           state.lastRoutePathError='floor transition blocked (enable intentional transitions explicitly)';
@@ -6825,7 +6874,7 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     state.running = true;
     state.entranceCompleted = false;
     state.currentIndex = chooseStartIndex(position);
-    state.direction = state.currentIndex >= route.length - 1 ? -1 : 1;
+    state.direction = config.routeTraversalMode === "pingpong" && state.currentIndex >= route.length - 1 ? -1 : 1;
     if (route.length <= 1) {
       state.direction = 1;
     }
@@ -6961,7 +7010,7 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     const nextIndex = Math.max(0, Math.min(route.length - 1, Math.trunc(Number(index) || 0)));
     state.currentIndex = nextIndex;
     state.entranceCompleted = entryWaypointCount === 0 || nextIndex >= entryWaypointCount;
-    state.direction = nextIndex >= route.length - 1 ? -1 : 1;
+    state.direction = config.routeTraversalMode === "pingpong" && nextIndex >= route.length - 1 ? -1 : 1;
     if (route.length <= 1) {
       state.direction = 1;
     }
@@ -7021,6 +7070,8 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
   function updateConfig(nextConfig = {}) {
     Object.assign(config, nextConfig);
     config.allowFloorTransitions = config.allowFloorTransitions === true;
+    config.routeTraversalMode = config.routeTraversalMode === "loop" ? "loop" : "pingpong";
+    if (config.routeTraversalMode === "loop") state.direction = 1;
     config.prioritizeMonsters = config.prioritizeMonsters === true;
     config.randomizeMovement = config.randomizeMovement === true;
     config.autoRecoverWaypoints = config.autoRecoverWaypoints !== false;
@@ -7997,7 +8048,7 @@ window.__minibiaBotBundle.installTalkModule = function installTalkModule(bot) {
       }
 
       if (!message.sender || isSpellIncantation(message.body) ||
-          bot.cave?.isModeratorChatMessage?.(message) || isSelfMessage(message) ||
+          isSelfMessage(message) ||
           (isNpcMessage(message) && !config.replyToNpcs) ||
           (!isNpcMessage(message) && isTrustedSender(message))) {
         rememberSeenMessage(message);
@@ -8250,7 +8301,6 @@ window.__minibiaBotBundle.installTalkModule = function installTalkModule(bot) {
   }
 
   function sendToCorrectChannel(target, reply) {
-    if (bot.cave?.isModeratorChatMessage?.(target)) return false;
     const manager = window.gameClient?.interface?.channelManager;
     if (!manager || typeof manager.sendMessageText !== "function") return false;
     if (!reply || reply.trim().startsWith("/")) return false;
@@ -10383,8 +10433,8 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
                 <span>Unknown player alarm (sound only; same floor)</span>
               </label>
               <div class="mb-small-note">Alerts on unfamiliar visible players, not monsters. Uses Trusted names; does not identify a hidden GM or stop any module.</div>
-              <label class="mb-toggle"><input type="checkbox" id="minibia-bot-panic-smart-chat" /><span>Smart chat alerts: private + targeted Default (sound only)</span></label>
-              <div class="mb-small-note">Alerts on new private messages or Default messages mentioning your name / directly asking if you are there. Ignores spells, trusted senders and old history. Does not alter hunt or attack. Separate from GM/CAPTCHA alerts.</div>
+              <label class="mb-toggle"><input type="checkbox" id="minibia-bot-panic-smart-chat" /><span>Chat alarm: ALL Default + PM (sound only)</span></label>
+              <div class="mb-small-note">Alerts on any new Default or private chat from others, even when players talk to each other. Ignores your own messages, game spells and old history. Audio is limited to once every 3 seconds; does not alter hunt, attack or Gemini.</div>
               <label class="mb-toggle">
                 <input type="checkbox" id="minibia-bot-panic-health" />
                 <span>Lose Health</span>
@@ -10601,6 +10651,14 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
                 <button type="button" class="mb-small-button" id="minibia-bot-cave-record">Record Spot</button>
                 <button type="button" class="mb-small-button" id="minibia-bot-cave-remove-last">Remove Last</button>
               </div>
+              <label class="mb-field" for="minibia-bot-cave-route-mode">
+                <span class="mb-field-label">Waypoint route mode</span>
+                <select id="minibia-bot-cave-route-mode">
+                  <option value="pingpong">Out &amp; back: 1 → 2 → 3 → 2 → 1</option>
+                  <option value="loop">Circular: 1 → 2 → 3 → 1</option>
+                </select>
+              </label>
+              <div class="mb-small-note">Out &amp; back uses the same recorded waypoints in reverse, without a return route. Entry waypoints (once) never repeat. Cross-floor return still needs a valid way back.</div>
               <div class="mb-small-note" id="minibia-bot-cave-closest">Closest start: no waypoints</div>
               <div class="mb-small-note" id="minibia-bot-cave-transition-status">Transitions learned: none</div>
               <label class="mb-field" for="minibia-bot-cave-entry-count">
@@ -10732,11 +10790,12 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
         <label class="mb-toggle"><input id="minibia-bot-quick-stairs" type="checkbox"/><span>Strict stair protection</span></label>
         <label class="mb-toggle"><input id="minibia-bot-quick-prioritize" type="checkbox"/><span>Prioritize Monsters</span></label>
         <label class="mb-toggle"><input id="minibia-bot-quick-random" type="checkbox"/><span>Randomize Movement</span></label>
+        <label class="mb-quick-hint" for="minibia-bot-quick-route-mode">Route mode <select id="minibia-bot-quick-route-mode"><option value="pingpong">Out &amp; back (reverse)</option><option value="loop">Circular loop</option></select></label>
         <label class="mb-toggle"><input id="minibia-bot-quick-leash" type="checkbox"/><span>Limit chase to route</span></label>
         <label class="mb-toggle"><input id="minibia-bot-quick-heal" type="checkbox"/><span>Auto Heal</span></label>
         <label class="mb-toggle"><input id="minibia-bot-quick-talk" type="checkbox"/><span>Auto Reply (Gemini)</span></label>
         <label class="mb-toggle"><input id="minibia-bot-quick-gemini-alarm" type="checkbox"/><span>Alarm if Gemini auto-reply fails (sound only)</span></label>
-        <label class="mb-toggle"><input id="minibia-bot-quick-smart-chat" type="checkbox"/><span>Smart chat alarm: PM + targeted Default (sound only)</span></label>
+        <label class="mb-toggle"><input id="minibia-bot-quick-smart-chat" type="checkbox"/><span>Chat alarm: ALL Default + PM (sound only)</span></label>
         <label class="mb-toggle"><input id="minibia-bot-quick-moderator" type="checkbox"/><span>GM alert: 30s stand &amp; fight</span></label>
         <label class="mb-toggle"><input id="minibia-bot-quick-verification" type="checkbox"/><span>Anti-bot notice: alarm &amp; stand (manual resume)</span></label>
         <label class="mb-toggle"><input id="minibia-bot-quick-travel-fight" type="checkbox"/><span>Fight on GO HOME / GO HUNT (else walk only)</span></label>
@@ -10987,6 +11046,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
       stairs:quickBar.querySelector('#minibia-bot-quick-stairs'),
       prioritize:quickBar.querySelector('#minibia-bot-quick-prioritize'),
       random:quickBar.querySelector('#minibia-bot-quick-random'),
+      routeMode:quickBar.querySelector('#minibia-bot-quick-route-mode'),
       leash:quickBar.querySelector('#minibia-bot-quick-leash'),
       heal:quickBar.querySelector('#minibia-bot-quick-heal'),
       talk:quickBar.querySelector('#minibia-bot-quick-talk'),
@@ -11017,6 +11077,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
       quickControls.stairs.checked=attackConfig.avoidFloorChangesOnChase!==false;
       quickControls.prioritize.checked=caveConfig.prioritizeMonsters===true;
       quickControls.random.checked=caveConfig.randomizeMovement===true;
+      quickControls.routeMode.value=caveConfig.routeTraversalMode||"pingpong";
       quickControls.leash.checked=caveConfig.limitChaseToRoute===true;
       quickControls.heal.checked=!!h?.running;
       quickControls.talk.checked=!!t?.running && t?.config?.replyMode==='gemini';
@@ -11037,6 +11098,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
       mirror('minibia-bot-auto-attack-chase-controller',attackConfig.chaseController||'hybrid');
       mirror('minibia-bot-cave-prioritize-monsters',caveConfig.prioritizeMonsters===true);
       mirror('minibia-bot-cave-random-movement',caveConfig.randomizeMovement===true);
+      mirror('minibia-bot-cave-route-mode',caveConfig.routeTraversalMode||'pingpong');
       mirror('minibia-bot-cave-moderator-pause',caveConfig.pauseOnModeratorMessage===true);
       mirror('minibia-bot-cave-verification-pause',caveConfig.pauseWaypointsOnVerification===true);
       mirror('minibia-bot-panic-unknown-alarm',bot.panic?.config?.unknownPlayerSoundAlertEnabled===true);
@@ -11059,7 +11121,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
         `ML Trainer ${r?.running?'ON':'OFF'} (${(runeConfig.runeCooldownMinMs??runeConfig.runeCooldownMs??3500)/1000}–${(runeConfig.runeCooldownMaxMs??runeConfig.runeCooldownMs??3500)/1000}s) · `+
         `Floor changes ${caveConfig.allowFloorTransitions?'allowed':'blocked'} · `+
         `Priority ${caveConfig.prioritizeMonsters?'ON':'OFF'} · `+
-        `Random ${caveConfig.randomizeMovement?'ON':'OFF'} · Entry once ${c?.entryWaypointCount||0} WPs · `+
+        `Random ${caveConfig.randomizeMovement?'ON':'OFF'} · Route ${caveConfig.routeTraversalMode==='loop'?'Circular':'Out/back'} · Entry once ${c?.entryWaypointCount||0} WPs · `+
         `Smart chat alarm ${bot.panic?.config?.smartChatAlertEnabled?'ON':'OFF'} · Nearby player alarm ${bot.panic?.config?.unknownPlayerSoundAlertEnabled?'ON':'OFF'} · GM alarm ${caveConfig.pauseOnModeratorMessage?'ON':'OFF'} · Notice alarm ${caveConfig.pauseWaypointsOnVerification?'ON':'OFF'} · `+
         `Travel fight ${caveConfig.travelFight?'ON':'OFF'} · Home ${c?.homeRouteValid?'ready':'route needed'}. Settings synced.`;
     }
@@ -11128,6 +11190,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     quickControl('stairs',(on)=>bot.attack.updateConfig({avoidFloorChangesOnChase:on}));
     quickControl('prioritize',(on)=>bot.cave.updateConfig({prioritizeMonsters:on}));
     quickControl('random',(on)=>bot.cave.updateConfig({randomizeMovement:on}));
+    quickControl('routeMode',(value)=>bot.cave.updateConfig({routeTraversalMode:value}));
     quickControl('moderator',(on)=>bot.cave.updateConfig({pauseOnModeratorMessage:on}));
     quickControl('verification',(on)=>bot.cave.updateConfig({pauseWaypointsOnVerification:on}));
     quickControl('travelFight',(on)=>bot.cave.updateConfig({travelFight:on}));
@@ -11319,6 +11382,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     const caveLimitChaseInput = panel.querySelector("#minibia-bot-cave-limit-chase");
     const caveMaxChaseInput = panel.querySelector("#minibia-bot-cave-max-chase");
     const caveEntryCountInput = panel.querySelector("#minibia-bot-cave-entry-count");
+    const caveRouteModeInput = panel.querySelector("#minibia-bot-cave-route-mode");
     const caveModeratorPauseInput = panel.querySelector("#minibia-bot-cave-moderator-pause");
     const caveVerificationPauseInput = panel.querySelector("#minibia-bot-cave-verification-pause");
     const caveVerificationTickInput = panel.querySelector("#minibia-bot-cave-verification-tick");
@@ -11534,6 +11598,13 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
       });
     }
 
+    if (caveRouteModeInput) {
+      caveRouteModeInput.value = bot.cave?.config?.routeTraversalMode || "pingpong";
+      caveRouteModeInput.addEventListener("change", () => {
+        bot.cave.updateConfig({ routeTraversalMode: caveRouteModeInput.value });
+        refreshQuickSummary();
+      });
+    }
     if (cavePrioritizeMonstersInput) {
       cavePrioritizeMonstersInput.checked = bot.cave?.config?.prioritizeMonsters === true;
       cavePrioritizeMonstersInput.addEventListener("change", () => {
