@@ -1951,6 +1951,9 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
         <button id="minibia-bot-quick-resume-notice" type="button">RESTORE CAPTCHA</button>
         <button id="minibia-bot-quick-alarm" type="button">TEST ALARM</button>
       </div>
+      <div class="mb-small-note" id="minibia-bot-quick-route-check" style="margin:4px 0;line-height:1.35">Rutas: comprobando…</div>
+      <div class="mb-small-note" id="minibia-bot-quick-alarm-reason" style="margin:4px 0;line-height:1.35">Última alarma: ninguna desde la carga del bot</div>
+      <div class="mb-small-note" id="minibia-bot-quick-hold-reason" style="margin:4px 0;line-height:1.35">Movimiento: comprobando…</div>
       <div class="mb-quick-summary" id="minibia-bot-quick-summary">Reading current module states…</div>
       <div class="mb-quick-tools">
         <details class="mb-quick-group" id="minibia-bot-quick-group-navigation">
@@ -2647,8 +2650,48 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
         `Rare mover ${floorStatusNow.running?'ON':'OFF'} · Stairs ${attackConfig.avoidFloorChangesOnChase!==false?'PROTECTED':'UNPROTECTED'} · `+
         `${c?.sellerRouteInfo?.valid?'Seller route ready':'Seller route not ready'}`;
     }
+    function refreshSafetySummary() {
+      const c=bot.cave?.status?.()||{};
+      const em=bot.emergencyState?.()||{};
+      const p=bot.panic?.status?.()||{};
+      const alert=bot.alarmStatus?.()?.last;
+      const routeLabel=quickBar.querySelector('#minibia-bot-quick-route-check');
+      const alertLabel=quickBar.querySelector('#minibia-bot-quick-alarm-reason');
+      const holdLabel=quickBar.querySelector('#minibia-bot-quick-hold-reason');
+      const huntRoute=c.route||[];
+      const routeName=c.activePresetName || quickRoute?.value || '(ninguna)';
+      const warnings=[];
+      if (!huntRoute.length) warnings.push('ruta de caza vacía');
+      if (c.config?.autoSellerVisit && !c.sellerRouteInfo?.valid) warnings.push('Shanar no conectado');
+      if (huntRoute.some(w=>w && w.z!==huntRoute[0]?.z) && !c.config?.allowFloorTransitions)
+        warnings.push('ruta cambia de piso y las transiciones están OFF');
+      if (c.config?.autoSellerVisit) {
+        const sale=bot.autoSell?.status?.()||{};
+        if (!sale.config?.enabled) warnings.push('Auto Sell OFF');
+        if (!String(sale.config?.allowedItems||'').trim()) warnings.push('sin lista de venta');
+      }
+      if (routeLabel) routeLabel.textContent =
+        `Rutas: ${routeName} (${huntRoute.length} WP) · Shanar ${c.sellerRouteInfo?.valid ? 'conectado' : 'sin validar'}` +
+        (warnings.length ? ` · REVISAR: ${warnings.join('; ')}` : ' · configuración básica OK');
+      if (alertLabel) alertLabel.textContent = alert
+        ? `Última alarma ${new Date(alert.at).toLocaleTimeString()}: ${alert.message} · ${alert.effect}`+
+          (alert.source ? ` · Origen: ${alert.source} · Canal: ${alert.channel||'?'} · Remitente: ${alert.sender||'?'} · Texto: ${alert.systemText||'(sin texto)'}` : '')
+        : 'Última alarma: ninguna registrada en esta pestaña';
+      if (!holdLabel) return;
+      const reasons=[];
+      if (em.halted) reasons.push('EMERGENCY STOP: usar botón de recuperación');
+      if (c.pausedForVerification) reasons.push(`Verificación detectada en ${c.lastVerificationSource||'origen desconocido'}: resolver y pulsar RESTORE CAPTCHA`);
+      if (c.moderatorPaused) reasons.push(`GM: pausa temporal (${Math.ceil((c.moderatorPauseRemainingMs||0)/1000)} s)`);
+      if (p.pendingReturn) reasons.push('Panic Runner: retorno pendiente');
+      if (c.lastRoutePathError && c.lastRoutePathErrorAt && Date.now()-c.lastRoutePathErrorAt<90000)
+        reasons.push(`Último problema de ruta: ${c.lastRoutePathError}`);
+      if (!c.running && !reasons.length) reasons.push('Cave Bot apagado (la última alarma no demuestra la causa)');
+      if (holdLabel) holdLabel.textContent = `Movimiento: ${reasons.length ? reasons.join(' · ') : 'sin bloqueos detectados'}`;
+    }
+
     function refreshQuickRoutes() {
       const names=bot.cave?.getPresetNames?.()||[];
+      refreshSafetySummary();
       const homeSelected=bot.cave?.config?.homePresetName||'';
       const sellerSelected=bot.cave?.config?.sellerPresetName||'';
       if (quickSellerRoute.options.length!==names.length+1 ||
@@ -2719,7 +2762,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
         'GO HUNT from Home failed: need completed GO HOME or stand on marked Home with valid recorded route';
     });
     quickAlarm.addEventListener('click',()=>{
-      bot.unlockAudio?.();bot.playAlarm?.();quickStatus.textContent='Alarm test requested (check browser sound)';
+      bot.unlockAudio?.();bot.reportAlarm?.('test', 'Prueba manual de sonido', 'Solo sonido; no detuvo el bot');quickStatus.textContent='Alarm test requested (check browser sound)';
     });
     quickResumeNotice.addEventListener('click',()=>{
       const result=bot.cave?.resumeAfterVerification?.();
@@ -3545,7 +3588,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
 
     if (caveTestAlarmButton) {
       caveTestAlarmButton.addEventListener("click", () => {
-        bot.playAlarm?.();
+        bot.reportAlarm?.('test', 'Prueba manual de sonido', 'Solo sonido; no detuvo el bot');
       });
     }
 

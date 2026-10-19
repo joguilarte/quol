@@ -19,6 +19,13 @@ window.__minibiaBotBundle.createBot = function createBot() {
   let reconnectObserver = null;
   let reconnectPollTimerId = null;
   let lastReconnectClickAt = 0;
+  const recentAlarms = (() => {
+    try {
+      const raw = JSON.parse(window.sessionStorage?.getItem('minibiaBot.alarmHistory.v1') || '[]');
+      return Array.isArray(raw) ? raw.filter(e => e && Number.isFinite(e.at) && typeof e.code === 'string').slice(0,15) : [];
+    } catch (_) { return []; }
+  })();
+
 
   function addCleanup(fn) {
     if (typeof fn === "function") {
@@ -483,6 +490,31 @@ window.__minibiaBotBundle.createBot = function createBot() {
         console.error("[minibia-bot] audio unlock failed", error);
         return false;
       }
+    },
+    reportAlarm(code, message, effect = "Solo sonido", details = null) {
+      // Keep ONLY validated system-notice metadata, never arbitrary chat or secrets.
+      const event = {
+        at: Date.now(),
+        code: String(code || "unknown").slice(0, 48),
+        message: String(message || "Alarma no clasificada").slice(0, 180),
+        effect: String(effect || "Solo sonido").slice(0, 120),
+      };
+      if (details && typeof details === 'object') {
+        event.source = String(details.source || '').slice(0,48);
+        event.channel = String(details.channel || '').slice(0,48);
+        event.sender = String(details.sender || '').slice(0,48);
+        event.stage = String(details.stage || '').slice(0,24);
+        event.systemText = String(details.systemText || '').slice(0,160);
+      }
+      recentAlarms.unshift(event);
+      if (recentAlarms.length > 15) recentAlarms.length = 15;
+      try { window.sessionStorage?.setItem('minibiaBot.alarmHistory.v1', JSON.stringify(recentAlarms)); } catch (_) {}
+      this.log("ALARM EVENT", event);
+      this.playAlarm();
+      return event;
+    },
+    alarmStatus() {
+      return { last: recentAlarms[0] || null, recent: recentAlarms.slice() };
     },
     playAlarm() {
       try {
@@ -1796,7 +1828,7 @@ window.__minibiaBotBundle.installPanicModule = function installPanicModule(bot) 
     }
 
     state.lastTriggerAt = now;
-    bot.playAlarm?.();
+    bot.reportAlarm?.('panic-'+reason, `Panic Runner: ${reason}`, 'Detuvo Cave Bot y ejecutó acción de Panic');
     bot.log("panic triggered", { reason, ...details });
 
     if (bot.cave?.stop) {
@@ -1814,7 +1846,7 @@ window.__minibiaBotBundle.installPanicModule = function installPanicModule(bot) 
   function triggerGameMasterKillSwitch(players) {
     const detectedPlayers = (players || []).map((player) => player?.name).filter(Boolean);
 
-    bot.playAlarm?.();
+    bot.reportAlarm?.('gm-kill-switch', `GM Kill Switch: ${detectedPlayers.join(', ') || 'nombre configurado'}`, 'Detuvo Cave Bot, ataque y otros módulos');
     bot.log("game master kill switch triggered", { players: detectedPlayers });
 
     if (bot.rune?.stop) {
@@ -1924,7 +1956,7 @@ window.__minibiaBotBundle.installPanicModule = function installPanicModule(bot) 
       players: newcomers.map((player) => String(player.name || '').trim()).filter(Boolean),
     };
     bot.log('unknown player nearby: sound-only alert', state.lastUnknownPlayerAlarm);
-    bot.playAlarm?.();
+    bot.reportAlarm?.('unknown-player', 'Jugador desconocido cerca', 'Solo sonido; sin detener módulos');
   }
 
   // Chat activity alert. Warn on ANY new Default or private message by another
@@ -1990,7 +2022,7 @@ window.__minibiaBotBundle.installPanicModule = function installPanicModule(bot) 
       state.lastSmartChatAlarm = state.pendingSmartChatAlarm;
       state.pendingSmartChatAlarm = null;
       bot.log('chat activity: sound-only alert', state.lastSmartChatAlarm);
-      bot.playAlarm?.();
+      bot.reportAlarm?.('chat', `Nuevo mensaje ${state.lastSmartChatAlarm.channel} de ${state.lastSmartChatAlarm.sender}`, 'Solo sonido; sin detener módulos');
     }
     if (state.smartChatSeen.size > 1600) {
       state.smartChatSeen = new Set(Array.from(state.smartChatSeen).slice(-800));
@@ -4442,7 +4474,13 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     pausedForVerification: false,
     verificationTimerId: null,
     lastVerificationNotice: null,
+    lastVerificationSource: null,
+    lastVerificationChannel: null,
+    lastVerificationSender: null,
     lastVerificationSeenAt: 0,
+    verificationPendingNotices: [],
+    verificationBoundConsole: null,
+    verificationDomSeen: new WeakMap(),
     ignoredVerificationNotice: null,
     verificationSnapshot: null,
     verificationSeenEntries: new WeakSet(),
@@ -6218,115 +6256,121 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
   }
 
   function verificationPhase(text) {
-    // Countdown warnings can have either "captcha in 30 seconds" or
-    // "30 seconds until captcha" wording, in Spanish or English.
     const match = String(text).match(/\b(60|30|15)\s*(?:seconds?|secs?|segundos?|segs?|s)\b/i);
-    if (match) return match[1];
-    if (/\b(?:starting|started|begin|active|now|iniciado|comenz[oó]|ahora)\b/i.test(text)) return 'challenge';
-    return 'notice';
+    return match ? match[1] : 'challenge';
   }
 
-  function getVerificationNotices() {
-    const out = [];
-    const channels = window.gameClient?.interface?.channelManager?.channels || [];
-    for (const channel of channels) {
-      const entries = channel?.__contents || [];
-      for (let i = Math.max(0, entries.length - 16); i < entries.length; i += 1) {
-        const entry = entries[i];
-        const text = String(entry?.message || entry?.text || '').trim();
-        if (!text || text.length >= 500 || !verificationNoticePattern.test(text) ||
-            verificationCompletePattern.test(text)) continue;
-        // Stable semantic key also handles clients that clone chat entries
-        // on every __contents read. WeakSet alone would re-trigger old warnings.
-        const stamp = String(entry?.id ?? entry?.__id ?? entry?.__time ?? entry?.time ?? '');
-        const semanticKey = `${channel?.name||''}|${stamp}|${entry?.author||entry?.sender||''}|${text}`;
-        if (state.verificationSeenFallback.has(semanticKey)) continue;
-        state.verificationSeenFallback.add(semanticKey);
-        if (state.verificationSeenFallback.size > 1200) {
-          state.verificationSeenFallback = new Set(Array.from(state.verificationSeenFallback).slice(-800));
-        }
-        if (entry && typeof entry === 'object') state.verificationSeenEntries.add(entry);
-        out.push({ text:text.slice(0,160), key:`chat:${channel?.name||''}:${i}:${text}` });
-      }
+  // STRICT: a generic mention of bot/check/captcha by another player is NOT
+  // a system verification. Only explicit countdowns or the active challenge UI.
+  const verificationCountdownPattern = /(?:\b(?:60|30|15)\s*(?:seconds?|secs?|segundos?|segs?|s)\b[^\n]{0,70}\b(?:captcha|verification|verificaci[oó]n|anti[\s_-]*bot|bot[\s_-]*(?:test|check|challenge))\b|\b(?:captcha|verification|verificaci[oó]n|anti[\s_-]*bot|bot[\s_-]*(?:test|check|challenge))\b[^\n]{0,70}\b(?:60|30|15)\s*(?:seconds?|secs?|segundos?|segs?|s)\b)/i;
+  const verificationActiveUiPattern = /(?:captcha|anti[\s_-]*bot|verificaci[oó]n|verify (?:you are|you're) human|toca el objeto que se ilumin[oó]|touch the (?:object|item) that (?:lit up|was illuminated))/i;
+
+  function enqueueTrustedVerificationNotice(text, source, channel='Console', sender='Sistema') {
+    const plain=String(text||'').replace(/<[^>]*>/g,' ').replace(/\s+/g,' ').trim();
+    if (!plain || plain.length>400 || verificationCompletePattern.test(plain)) return false;
+    const strictCountdown=verificationCountdownPattern.test(plain);
+    if (source==='Console (sistema)' && !strictCountdown) return false;
+    if (source==='Ventana de verificación' && !verificationActiveUiPattern.test(plain)) return false;
+    if (state.verificationPendingNotices.length >= 25) state.verificationPendingNotices.shift();
+    state.verificationPendingNotices.push({text:plain.slice(0,160),source,channel,sender,at:Date.now()});
+    return true;
+  }
+
+  // The actual Minibia client routes server broadcasts to Console with
+  // ChannelManager.addConsoleMessage(). Never scan player chat or PM channels.
+  function watchVerificationSystemConsole() {
+    const manager=window.gameClient?.interface?.channelManager;
+    if (!manager || typeof manager.addConsoleMessage!=='function') return;
+    if (state.verificationBoundConsole?.manager === manager &&
+        manager.addConsoleMessage === state.verificationBoundConsole.wrapper) return;
+    if (state.verificationBoundConsole) {
+      const prev=state.verificationBoundConsole;
+      if (prev.manager.addConsoleMessage === prev.wrapper) prev.manager.addConsoleMessage=prev.original;
+      state.verificationBoundConsole=null;
     }
-    if (!document.body || typeof document.createTreeWalker !== 'function') return out;
-    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
-    let visited = 0;
-    let node;
-    while ((node = walker.nextNode()) && visited++ < 4000) {
-      const text = String(node.textContent || '').trim();
-      if (!text || text.length >= 350 || !verificationNoticePattern.test(text) ||
-          verificationCompletePattern.test(text)) continue;
-      const parent = node.parentElement;
-      if (!parent || parent.closest('#minibia-bot-panel, script, style, noscript, template')) continue;
-      if (parent.closest('[aria-hidden="true"], [hidden]')) continue;
-      if (typeof parent.getClientRects === 'function' && parent.getClientRects().length === 0) continue;
-      if (state.verificationSeenNodes.has(node)) continue;
-      state.verificationSeenNodes.add(node);
-      out.push({ text:text.slice(0,160), key:`dom:${text}` });
+    const original=manager.addConsoleMessage;
+    const wrapper=function(message, ...args) {
+      const result=original.call(this,message,...args);
+      if (config.pauseWaypointsOnVerification) {
+        enqueueTrustedVerificationNotice(message, 'Console (sistema)', 'Console', 'Sistema');
+      }
+      return result;
+    };
+    manager.addConsoleMessage=wrapper;
+    state.verificationBoundConsole={manager,original,wrapper};
+  }
+  bot.addCleanup?.(() => {
+    const old=state.verificationBoundConsole;
+    if (old && old.manager.addConsoleMessage===old.wrapper) old.manager.addConsoleMessage=old.original;
+    state.verificationBoundConsole=null;
+  });
+
+  // Only inspect an actual visible dedicated challenge dialog. We do not
+  // search all DOM text: that previously matched chat transcript text.
+  function getVisibleChallengeDialogNotices() {
+    if (!document.body) return [];
+    const out=[];
+    for (const node of document.querySelectorAll(
+      '#captcha-modal, #verification-modal, [data-testid="captcha-modal"], '+
+      '[data-testid="verification-modal"], [class~="captcha-modal"], '+
+      '[class~="verification-modal"], [id^="captcha-"], [id^="verification-"]')) {
+      if (node.closest('#minibia-bot-panel') || node.closest('#server-message, #notification')) continue;
+      if (node.closest('[hidden], [aria-hidden="true"]') || node.getClientRects?.().length===0) continue;
+      const text=String(node.textContent||'').replace(/\s+/g,' ').trim();
+      if (!text || text.length>350 || !verificationActiveUiPattern.test(text)) continue;
+      if (state.verificationDomSeen.get(node)===text) continue;
+      state.verificationDomSeen.set(node,text);
+      out.push({text:text.slice(0,160),source:'Ventana de verificación',channel:'Interfaz',sender:'Sistema',at:Date.now()});
     }
     return out;
-  }
-
-  function findVisibleVerificationNotice() {
-    // A read-only check used by diagnostics and manual restore; no consumption.
-    for (const channel of window.gameClient?.interface?.channelManager?.channels || []) {
-      const entries = channel?.__contents || [];
-      for (let i=entries.length-1; i>=Math.max(0,entries.length-8);i--) {
-        const text=String(entries[i]?.message || entries[i]?.text || '').trim();
-        if (text && verificationNoticePattern.test(text) && !verificationCompletePattern.test(text))
-          return {text:text.slice(0,160), key:`chat:${channel?.name||''}:${i}:${text}`};
-      }
-    }
-    return null;
   }
 
   function scanVerificationNotice() {
     if (!config.pauseWaypointsOnVerification) return;
     try {
-      // A separate safety module may stop Cave Bot while the challenge is up.
-      // Restore only the MOVEMENT hold, never auto-restart attack or walking.
-      // Auto Attack remains free to select/hit targets while stationary.
+      watchVerificationSystemConsole();
       if (state.pausedForVerification) {
-        bot.attack?.setMovementHold?.('verification', true);
+        bot.attack?.setMovementHold?.('verification',true);
         if (state.running) cancelOwnWaypointWalk();
       }
-      const notices = getVerificationNotices();
-      if (!notices.length) return;
-      let shouldSound = false;
+      const notices=state.verificationPendingNotices.splice(0).concat(getVisibleChallengeDialogNotices());
       for (const notice of notices) {
         if (!state.pausedForVerification) {
           saveVerificationSnapshot();
-          state.pausedForVerification = true;
+          state.pausedForVerification=true;
           cancelOwnWaypointWalk();
-          bot.attack?.setMovementHold?.('verification', true);
+          bot.attack?.setMovementHold?.('verification',true);
           bot.safeNavigation?.cancel?.('attack');
-          bot.log('verification warning: navigation held, stationary combat preserved');
+          bot.log('verified system challenge: movement held, stationary combat preserved');
         }
-        state.lastVerificationSeenAt = Date.now();
-        state.lastVerificationNotice = notice.text;
-        const phase = verificationPhase(notice.text);
-        state.verificationLastPhase = phase;
+        state.lastVerificationSeenAt=Date.now();
+        state.lastVerificationNotice=notice.text;
+        state.lastVerificationSource=notice.source;
+        state.lastVerificationChannel=notice.channel;
+        state.lastVerificationSender=notice.sender;
+        const phase=verificationPhase(notice.text);
+        state.verificationLastPhase=phase;
         if (!state.verificationAlarmedStages.has(phase)) {
           state.verificationAlarmedStages.add(phase);
-          shouldSound = true;
-          bot.log('verification warning phase', { phase, notice:notice.text });
+          bot.reportAlarm?.('captcha-'+phase, `Aviso de verificación ${phase}: ${notice.source}`,
+            'Movimiento y persecución pausados; Auto Attack estacionario conservado',
+            {source:notice.source,channel:notice.channel,sender:notice.sender,stage:phase,systemText:notice.text});
+          bot.log('verification warning confirmed', {phase,source:notice.source,channel:notice.channel,sender:notice.sender});
         }
       }
-      if (shouldSound) bot.playAlarm?.();
-    } catch (error) {
-      bot.log('verification notice check failed', error?.message || error);
-    }
+    } catch(error) { bot.log('verification notice check failed',error?.message||error); }
   }
 
   function restartVerificationScanner() {
     if (state.verificationTimerId != null) {
       window.clearInterval(state.verificationTimerId);
-      state.verificationTimerId = null;
+      state.verificationTimerId=null;
     }
+    state.verificationPendingNotices.length=0; // Never replay messages before enabling/reloading.
     if (!config.pauseWaypointsOnVerification) return;
+    watchVerificationSystemConsole();
     scanVerificationNotice();
-    state.verificationTimerId = window.setInterval(scanVerificationNotice, config.verificationScanTickMs);
+    state.verificationTimerId=window.setInterval(scanVerificationNotice,config.verificationScanTickMs);
   }
 
   // Special-status chat sender detector. No color-only guessing: colors are
@@ -6392,7 +6436,7 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
           cancelOwnWaypointWalk();
           bot.attack?.setMovementHold?.('moderator', true);
           bot.safeNavigation?.cancel?.('attack');
-          bot.playAlarm?.();
+          bot.reportAlarm?.('gm-chat', `Mensaje de moderador: ${msg.sender}`, `Movimiento en pausa ${Math.ceil(config.moderatorPauseMs/1000)} s; ataque estacionario`);
           bot.log('cave paused after moderator chat', { sender: msg.sender, seconds: config.moderatorPauseMs/1000 });
         }
       }
@@ -6437,6 +6481,9 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     const snapshot = getVerificationSnapshot();
     state.pausedForVerification = false;
     state.lastVerificationNotice = null;
+    state.lastVerificationSource = null;
+    state.lastVerificationChannel = null;
+    state.lastVerificationSender = null;
     state.verificationLastPhase = null;
     state.verificationAlarmedStages.clear();
     state.lastPathAt = 0;
@@ -7010,7 +7057,7 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     if (destination?.z !== position.z) {
       if (!config.allowFloorTransitions) {
         bot.log('seller route blocked: explicit floor transitions are OFF');
-        stop();bot.playAlarm?.();return true;
+        stop();bot.reportAlarm?.('seller-floor-blocked', 'Viaje a Shanar: cambios de piso desactivados', 'Cave Bot detenido');return true;
       }
       state.expectedFloor=null;
       const previous = trip.phase === 'exit-hunt'
@@ -7050,11 +7097,12 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
       // resuming the route on another floor (never auto-recover via stairs).
       if (!config.allowFloorTransitions && state.expectedFloor !== null &&
           position && position.z !== state.expectedFloor) {
+        const expectedBeforeStop = state.expectedFloor;
         bot.log('UNEXPECTED FLOOR CHANGE: cave and melee stopped',
-          {expected:state.expectedFloor,observed:position.z});
+          {expected:expectedBeforeStop,observed:position.z});
         bot.attack?.stop?.();
         stop();
-        bot.playAlarm?.();
+        bot.reportAlarm?.('unexpected-floor', `Piso inesperado: esperaba ${expectedBeforeStop}, detectó ${position.z}`, 'Detuvo Cave Bot y Auto Attack');
         return;
       }
       // Moderator alert pauses movement ONLY; Auto Attack and Auto Heal keep running.
@@ -7188,7 +7236,7 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
           state.lastRoutePathError='floor transition blocked (enable intentional transitions explicitly)';
           state.lastRoutePathErrorAt=now;
           stop();
-          bot.playAlarm?.();
+          bot.reportAlarm?.('forbidden-floor', 'Waypoint requiere cambio de piso no autorizado', 'Detuvo Cave Bot');
           bot.log('cave stopped: waypoint requires a forbidden floor change',waypoint);
           return;
         }
@@ -7448,6 +7496,9 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
       pausedForFloorMove: state.pausedForFloorMove,
       pausedForVerification: state.pausedForVerification && config.pauseWaypointsOnVerification,
       lastVerificationNotice: state.lastVerificationNotice,
+      lastVerificationSource: state.lastVerificationSource,
+      lastVerificationChannel: state.lastVerificationChannel,
+      lastVerificationSender: state.lastVerificationSender,
       lastVerificationSeenAt: state.lastVerificationSeenAt,
       verificationLastPhase: state.verificationLastPhase,
       verificationSavedSetup: !!getVerificationSnapshot(),
@@ -8778,7 +8829,7 @@ window.__minibiaBotBundle.installTalkModule = function installTalkModule(bot) {
     // One alarm per 30s during an outage; no changes to attack, heal or navigation.
     if (config.alarmOnGeminiFailure && state.lastGeminiFailureAt - state.lastGeminiAlarmAt >= 30000) {
       state.lastGeminiAlarmAt = state.lastGeminiFailureAt;
-      bot.playAlarm?.();
+      bot.reportAlarm?.('gemini-error', `Respuesta Gemini falló: ${reason}`, 'Solo sonido; sin detener módulos');
     }
   }
 
@@ -9765,7 +9816,7 @@ window.__minibiaBotBundle.installAutoSellModule = function installAutoSellModule
         const capLimit = Number(bot.cave?.config?.minimumFreeCapacity);
         if (Number.isFinite(freeCap) && Number.isFinite(capLimit) && freeCap <= capLimit) {
           pause(`Sale verified, but free capacity (${freeCap} oz) is still at/below the seller threshold (${capLimit} oz). Review supplies/loot before returning.`);
-          bot.playAlarm?.();
+          bot.reportAlarm?.('sell-low-cap', 'Venta completada, pero capacidad sigue baja', 'Venta pausada para revisión manual');
         } else if (!bot.cave?.resumeFromSeller?.()) {
           pause("Sale completed and trade closed, but return could not start; use Confirm Sale & Return");
         }
@@ -9773,7 +9824,7 @@ window.__minibiaBotBundle.installAutoSellModule = function installAutoSellModule
     } else if (sawUnavailable) {
       if (!state.manualSession && bot.cave?.getSellerTripStatus?.()?.phase === 'waiting-at-seller') {
         pause('No allowed loot found in open backpacks; automatic return paused to avoid a repeated seller loop');
-        bot.playAlarm?.();
+        bot.reportAlarm?.('sell-no-items', 'Shanar: no hay objetos autorizados disponibles', 'Venta pausada para revisión manual');
       } else {
         state.phase = "no-matching-items";
       }
@@ -11805,6 +11856,9 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
         <button id="minibia-bot-quick-resume-notice" type="button">RESTORE CAPTCHA</button>
         <button id="minibia-bot-quick-alarm" type="button">TEST ALARM</button>
       </div>
+      <div class="mb-small-note" id="minibia-bot-quick-route-check" style="margin:4px 0;line-height:1.35">Rutas: comprobando…</div>
+      <div class="mb-small-note" id="minibia-bot-quick-alarm-reason" style="margin:4px 0;line-height:1.35">Última alarma: ninguna desde la carga del bot</div>
+      <div class="mb-small-note" id="minibia-bot-quick-hold-reason" style="margin:4px 0;line-height:1.35">Movimiento: comprobando…</div>
       <div class="mb-quick-summary" id="minibia-bot-quick-summary">Reading current module states…</div>
       <div class="mb-quick-tools">
         <details class="mb-quick-group" id="minibia-bot-quick-group-navigation">
@@ -12501,8 +12555,48 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
         `Rare mover ${floorStatusNow.running?'ON':'OFF'} · Stairs ${attackConfig.avoidFloorChangesOnChase!==false?'PROTECTED':'UNPROTECTED'} · `+
         `${c?.sellerRouteInfo?.valid?'Seller route ready':'Seller route not ready'}`;
     }
+    function refreshSafetySummary() {
+      const c=bot.cave?.status?.()||{};
+      const em=bot.emergencyState?.()||{};
+      const p=bot.panic?.status?.()||{};
+      const alert=bot.alarmStatus?.()?.last;
+      const routeLabel=quickBar.querySelector('#minibia-bot-quick-route-check');
+      const alertLabel=quickBar.querySelector('#minibia-bot-quick-alarm-reason');
+      const holdLabel=quickBar.querySelector('#minibia-bot-quick-hold-reason');
+      const huntRoute=c.route||[];
+      const routeName=c.activePresetName || quickRoute?.value || '(ninguna)';
+      const warnings=[];
+      if (!huntRoute.length) warnings.push('ruta de caza vacía');
+      if (c.config?.autoSellerVisit && !c.sellerRouteInfo?.valid) warnings.push('Shanar no conectado');
+      if (huntRoute.some(w=>w && w.z!==huntRoute[0]?.z) && !c.config?.allowFloorTransitions)
+        warnings.push('ruta cambia de piso y las transiciones están OFF');
+      if (c.config?.autoSellerVisit) {
+        const sale=bot.autoSell?.status?.()||{};
+        if (!sale.config?.enabled) warnings.push('Auto Sell OFF');
+        if (!String(sale.config?.allowedItems||'').trim()) warnings.push('sin lista de venta');
+      }
+      if (routeLabel) routeLabel.textContent =
+        `Rutas: ${routeName} (${huntRoute.length} WP) · Shanar ${c.sellerRouteInfo?.valid ? 'conectado' : 'sin validar'}` +
+        (warnings.length ? ` · REVISAR: ${warnings.join('; ')}` : ' · configuración básica OK');
+      if (alertLabel) alertLabel.textContent = alert
+        ? `Última alarma ${new Date(alert.at).toLocaleTimeString()}: ${alert.message} · ${alert.effect}`+
+          (alert.source ? ` · Origen: ${alert.source} · Canal: ${alert.channel||'?'} · Remitente: ${alert.sender||'?'} · Texto: ${alert.systemText||'(sin texto)'}` : '')
+        : 'Última alarma: ninguna registrada en esta pestaña';
+      if (!holdLabel) return;
+      const reasons=[];
+      if (em.halted) reasons.push('EMERGENCY STOP: usar botón de recuperación');
+      if (c.pausedForVerification) reasons.push(`Verificación detectada en ${c.lastVerificationSource||'origen desconocido'}: resolver y pulsar RESTORE CAPTCHA`);
+      if (c.moderatorPaused) reasons.push(`GM: pausa temporal (${Math.ceil((c.moderatorPauseRemainingMs||0)/1000)} s)`);
+      if (p.pendingReturn) reasons.push('Panic Runner: retorno pendiente');
+      if (c.lastRoutePathError && c.lastRoutePathErrorAt && Date.now()-c.lastRoutePathErrorAt<90000)
+        reasons.push(`Último problema de ruta: ${c.lastRoutePathError}`);
+      if (!c.running && !reasons.length) reasons.push('Cave Bot apagado (la última alarma no demuestra la causa)');
+      if (holdLabel) holdLabel.textContent = `Movimiento: ${reasons.length ? reasons.join(' · ') : 'sin bloqueos detectados'}`;
+    }
+
     function refreshQuickRoutes() {
       const names=bot.cave?.getPresetNames?.()||[];
+      refreshSafetySummary();
       const homeSelected=bot.cave?.config?.homePresetName||'';
       const sellerSelected=bot.cave?.config?.sellerPresetName||'';
       if (quickSellerRoute.options.length!==names.length+1 ||
@@ -12573,7 +12667,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
         'GO HUNT from Home failed: need completed GO HOME or stand on marked Home with valid recorded route';
     });
     quickAlarm.addEventListener('click',()=>{
-      bot.unlockAudio?.();bot.playAlarm?.();quickStatus.textContent='Alarm test requested (check browser sound)';
+      bot.unlockAudio?.();bot.reportAlarm?.('test', 'Prueba manual de sonido', 'Solo sonido; no detuvo el bot');quickStatus.textContent='Alarm test requested (check browser sound)';
     });
     quickResumeNotice.addEventListener('click',()=>{
       const result=bot.cave?.resumeAfterVerification?.();
@@ -13399,7 +13493,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
 
     if (caveTestAlarmButton) {
       caveTestAlarmButton.addEventListener("click", () => {
-        bot.playAlarm?.();
+        bot.reportAlarm?.('test', 'Prueba manual de sonido', 'Solo sonido; no detuvo el bot');
       });
     }
 
