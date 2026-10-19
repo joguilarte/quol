@@ -10670,6 +10670,133 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
       #minibia-bot-panel .mb-fold summary { cursor:pointer; color:#e9d6a4; font-weight:700; padding:4px; }
       #minibia-bot-panel .mb-fold[open] summary { border-bottom:1px solid rgba(224,200,148,.18); margin-bottom:8px; }
       #minibia-bot-panel .mb-fold .mb-section { border:0; }
+      /* V24 compact single-screen Quick Hunt: all toggles are always visible. */
+      #minibia-bot-panel .mb-quick-bar {
+        padding:8px; gap:5px; border-radius:7px; align-content:start;
+      }
+      #minibia-bot-panel .mb-quick-head {flex-wrap:nowrap;}
+      #minibia-bot-panel .mb-quick-advanced-btn {
+        width:auto; min-width:0; padding:4px 9px; font-size:11px;
+      }
+      #minibia-bot-panel .mb-quick-routes {gap:5px;}
+      #minibia-bot-panel .mb-quick-routes .mb-quick-route {gap:2px;font-size:11px;}
+      #minibia-bot-panel .mb-quick-routes select {max-height:25px;font-size:11px;}
+      #minibia-bot-panel .mb-quick-core {padding:3px 0;gap:5px 11px;}
+      #minibia-bot-panel .mb-quick-settings {gap:4px 12px;}
+      #minibia-bot-panel .mb-quick-settings .mb-toggle {gap:4px;white-space:nowrap;font-size:12px;}
+      #minibia-bot-panel .mb-quick-settings input[type=checkbox] {
+        width:14px;height:14px;min-width:14px;
+      }
+      #minibia-bot-panel .mb-quick-actions {gap:4px;align-items:center;}
+      #minibia-bot-panel .mb-quick-actions button {
+        min-width:0;width:auto;padding:5px 9px;font-size:11px;white-space:nowrap;
+      }
+      #minibia-bot-panel #minibia-bot-quick-start {background:#7a5f35;}
+      #minibia-bot-panel .mb-quick-summary {
+        padding:4px 7px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:11px;
+      }
+      #minibia-bot-panel .mb-quick-tools {display:flex;flex-direction:column;gap:2px;}
+      #minibia-bot-panel .mb-quick-group {
+        display:flex;align-items:center;flex-wrap:wrap;min-width:0;gap:3px 10px;
+        padding:4px 6px;margin:0;border-radius:4px;background:rgba(15,12,8,.17);
+      }
+      #minibia-bot-panel .mb-quick-group .mb-quick-category {
+        color:#d9c291;flex:0 0 138px;font-size:11px;font-weight:bold;
+      }
+      #minibia-bot-panel .mb-quick-group > .mb-quick-settings {
+        padding:0; flex:1 1 600px; display:flex; align-items:center; gap:4px 12px;
+        flex-wrap:wrap;
+      }
+      #minibia-bot-panel .mb-quick-group > .mb-quick-settings label:not(.mb-toggle) {
+        display:inline-flex;gap:4px;align-items:center;font-size:11px;
+      }
+      #minibia-bot-panel .mb-quick-group select {
+        width:auto;min-width:80px;max-width:140px;height:23px;font-size:11px;
+      }
+      #minibia-bot-panel .mb-quick-group > .mb-quick-actions {gap:4px;}
+      #minibia-bot-panel .mb-quick-group .mb-small-note {display:none;}
+      #minibia-bot-panel .mb-quick-secondary {display:flex;}
+      #minibia-bot-panel .mb-quick-group .mb-quick-training {
+        display:flex!important;flex:1 1 520px;gap:5px!important;
+        margin:0!important;align-items:center!important;flex-wrap:wrap!important;
+      }
+      #minibia-bot-panel .mb-quick-group .mb-quick-training .mb-field {
+        flex:0 0 auto!important;display:inline-flex;align-items:center;gap:4px;font-size:11px;
+      }
+      #minibia-bot-panel .mb-quick-group .mb-quick-training .mb-field-label {font-size:11px;}
+      #minibia-bot-panel .mb-quick-group .mb-quick-training input[type=text] {
+        width:110px;max-width:110px;height:23px;font-size:11px;
+      }
+      #minibia-bot-panel .mb-quick-group .mb-quick-training input[type=number] {
+        width:52px;max-width:52px;height:23px;font-size:11px;
+      }
+      #minibia-bot-panel .mb-quick-status,#minibia-bot-panel #minibia-bot-quick-status {
+        font-size:11px;margin:0;
+      }
+      /* Every control remains visible on the SAME panel: no hidden Advanced state. */
+      @container (max-width:850px) {
+        #minibia-bot-panel .mb-quick-group .mb-quick-category {flex-basis:105px;}
+      }
+      @container (max-width:540px) {
+        #minibia-bot-panel .mb-quick-group .mb-quick-category {flex-basis:100%;}
+        #minibia-bot-panel .mb-quick-group > .mb-quick-settings {flex-basis:100%;}
+      }
+      /* Flat V24 hub: essential row at top, all features in labeled, visible cards. */
+      #minibia-bot-panel .mb-quick-bar {
+        display:flex;flex-direction:column;align-items:stretch;gap:8px;padding:10px;
+      }
+      #minibia-bot-panel .mb-quick-tools {
+        display:grid; grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;
+        align-items:stretch;
+      }
+      #minibia-bot-panel .mb-quick-group {
+        display:flex; flex-direction:column; align-items:stretch; gap:6px;
+        border:1px solid rgba(224,200,148,.24); padding:9px;
+        background:rgba(14,12,9,.29); border-radius:7px;
+      }
+      #minibia-bot-panel .mb-quick-group .mb-quick-category {
+        flex:0 0 auto; display:block; width:auto; padding:0 0 5px;
+        border-bottom:1px solid rgba(224,200,148,.22); color:#f0d89f;
+        font-size:12px;letter-spacing:.02em;
+      }
+      #minibia-bot-panel .mb-quick-group > .mb-quick-settings { flex:0 0 auto; gap:7px 15px; }
+      #minibia-bot-panel .mb-quick-group .mb-quick-inline-tools {
+        display:flex;flex-wrap:wrap;gap:6px;align-items:end;padding:2px 0;
+      }
+      #minibia-bot-panel .mb-quick-inline-tools label {flex:1 1 150px;max-width:240px;font-size:11px;}
+      #minibia-bot-panel .mb-quick-inline-tools button {width:auto;padding:5px 8px;}
+      #minibia-bot-panel .mb-quick-group .mb-quick-route {
+        display:flex;align-items:center;gap:7px;font-size:11px;min-width:0;
+      }
+      #minibia-bot-panel .mb-quick-group .mb-quick-route input,
+      #minibia-bot-panel .mb-quick-group .mb-quick-route textarea {
+        width:min(100%,220px);max-width:220px;min-width:0;
+        min-height:24px;max-height:54px;resize:vertical;
+        box-sizing:border-box;font-size:11px;
+      }
+      #minibia-bot-panel .mb-quick-group .mb-quick-route textarea {height:30px;}
+      #minibia-bot-panel .mb-quick-group .mb-small-note {display:none;}
+      #minibia-bot-panel .mb-quick-group #minibia-bot-quick-floor-status {display:block;font-size:10px;}
+      #minibia-bot-panel .mb-quick-summary {white-space:normal;}
+      #minibia-bot-panel .mb-flat-monitoring {grid-column:auto;display:grid;gap:8px;}
+      #minibia-bot-panel .mb-flat-monitoring > .mb-label {font-weight:bold;}
+      #minibia-bot-panel .mb-flat-section {border:1px solid rgba(224,200,148,.2);border-radius:6px;padding:6px;}
+      #minibia-bot-panel .mb-flat-section > .mb-label {padding:5px;color:#e9d6a4;}
+      #minibia-bot-panel .mb-main-column,
+      #minibia-bot-panel .mb-side-column,
+      #minibia-bot-panel .mb-cave-column {min-width:0;}
+      #minibia-bot-panel .mb-body > .mb-main-column,
+      #minibia-bot-panel .mb-body > .mb-side-column,
+      #minibia-bot-panel .mb-body > .mb-cave-column {
+        border-top:2px solid rgba(224,200,148,.27);padding-top:12px;
+      }
+      @container (max-width:900px) {
+        #minibia-bot-panel .mb-quick-tools {grid-template-columns:1fr;}
+      }
+      @container (max-width:540px) {
+        #minibia-bot-panel .mb-quick-routes {grid-template-columns:1fr;}
+        #minibia-bot-panel .mb-quick-group .mb-quick-category {flex-basis:auto;}
+      }
       /* Compact emergency handle: always on top, independently draggable and keyboard accessible. */
       #minibia-bot-emergency-stop {
         box-sizing:border-box; position:fixed; bottom:16px; left:16px; width:44px; height:44px;
@@ -11074,7 +11201,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     const quickBar = document.createElement("div");
     quickBar.className = "mb-quick-bar";
     quickBar.innerHTML = `
-      <div class="mb-quick-head"><strong>QUICK HUB · V24</strong><span class="mb-quick-hint">Hunt, seguridad y utilidades · controles compartidos</span></div>
+      <div class="mb-quick-head"><strong>HUNT ESSENTIALS · V24</strong><span class="mb-quick-hint">Tildá y presioná START HUNT · Todas las opciones en esta ventana</span></div>
       <div class="mb-quick-routes">
         <label class="mb-quick-route">Hunt route <select id="minibia-bot-quick-route"></select></label>
         <label class="mb-quick-route">Seller route (Shanar ↔ Hunt) <select id="minibia-bot-quick-seller-route"></select></label>
@@ -11103,27 +11230,27 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
         <details class="mb-quick-group" id="minibia-bot-quick-group-navigation">
           <summary>Movimiento y ruta <span class="mb-quick-group-sub">waypoints · chase · stairs</span></summary>
           <div class="mb-quick-settings">
-            <label class="mb-toggle"><input id="minibia-bot-quick-prioritize" type="checkbox"/><span>Prioritize Monsters</span></label>
-            <label class="mb-toggle"><input id="minibia-bot-quick-random" type="checkbox"/><span>Randomize Movement</span></label>
-            <label class="mb-toggle"><input id="minibia-bot-quick-leash" type="checkbox"/><span>Limit chase to route</span></label>
-            <label class="mb-toggle"><input id="minibia-bot-quick-allow-floors" type="checkbox"/><span>Allow recorded floor changes</span></label>
-            <label class="mb-toggle"><input id="minibia-bot-quick-tools-floor" type="checkbox"/><span>Use shovel / rope</span></label>
-            <label class="mb-toggle"><input id="minibia-bot-quick-travel-fight" type="checkbox"/><span>Fight while travelling</span></label>
-            <label>Route mode <select id="minibia-bot-quick-route-mode"><option value="pingpong">Out &amp; back (reverse)</option><option value="loop">Circular loop</option></select></label>
-            <label>Chase <select id="minibia-bot-quick-chase"><option value="pathfinder">Bot pathfinding</option><option value="hybrid">Hybrid</option><option value="native">Native</option></select></label>
+            <label class="mb-toggle"><input id="minibia-bot-quick-prioritize" type="checkbox"/><span>Priority mobs</span></label>
+            <label class="mb-toggle"><input id="minibia-bot-quick-random" type="checkbox"/><span>Random move</span></label>
+            <label class="mb-toggle"><input id="minibia-bot-quick-leash" type="checkbox"/><span>Chase limit</span></label>
+            <label class="mb-toggle"><input id="minibia-bot-quick-allow-floors" type="checkbox"/><span>Recorded stairs</span></label>
+            <label class="mb-toggle"><input id="minibia-bot-quick-tools-floor" type="checkbox"/><span>Shovel / Rope</span></label>
+            <label class="mb-toggle"><input id="minibia-bot-quick-travel-fight" type="checkbox"/><span>Fight on trip</span></label>
+            <label>Route mode <select id="minibia-bot-quick-route-mode"><option value="pingpong">Out &amp; back</option><option value="loop">Loop</option></select></label>
+            <label>Chase <select id="minibia-bot-quick-chase"><option value="pathfinder">Bot path</option><option value="hybrid">Hybrid</option><option value="native">Native</option></select></label>
           </div>
         </details>
         <details class="mb-quick-group" id="minibia-bot-quick-group-alerts">
           <summary>Alarmas y Monitoring <span class="mb-quick-group-sub">GM · CAPTCHA · jugadores · chat</span></summary>
           <div class="mb-quick-settings">
-            <label class="mb-toggle"><input id="minibia-bot-quick-verification" type="checkbox"/><span>CAPTCHA alarm + stationary attack</span></label>
-            <label class="mb-toggle"><input id="minibia-bot-quick-moderator" type="checkbox"/><span>GM alert: 30s stand &amp; fight</span></label>
-            <label class="mb-toggle"><input id="minibia-bot-quick-smart-chat" type="checkbox"/><span>ALL Default + PM alarm (sound only)</span></label>
-            <label class="mb-toggle"><input id="minibia-bot-quick-gemini-alarm" type="checkbox"/><span>Alarm on Gemini failure</span></label>
-            <label class="mb-toggle"><input id="minibia-bot-quick-unknown-alarm" type="checkbox"/><span>Unknown player nearby: sound only</span></label>
-            <label class="mb-toggle"><input id="minibia-bot-quick-panic-unknown" type="checkbox"/><span>Panic on unknown player (stops modules)</span></label>
-            <label class="mb-toggle"><input id="minibia-bot-quick-panic-health" type="checkbox"/><span>Panic on health loss</span></label>
-            <label class="mb-toggle"><input id="minibia-bot-quick-panic-return" type="checkbox"/><span>Auto Return after Panic</span></label>
+            <label class="mb-toggle"><input id="minibia-bot-quick-verification" type="checkbox"/><span>CAPTCHA alarm</span></label>
+            <label class="mb-toggle"><input id="minibia-bot-quick-moderator" type="checkbox"/><span>GM alarm</span></label>
+            <label class="mb-toggle"><input id="minibia-bot-quick-smart-chat" type="checkbox"/><span>Chat alarm</span></label>
+            <label class="mb-toggle"><input id="minibia-bot-quick-gemini-alarm" type="checkbox"/><span>Gemini error alarm</span></label>
+            <label class="mb-toggle"><input id="minibia-bot-quick-unknown-alarm" type="checkbox"/><span>Nearby player alarm</span></label>
+            <label class="mb-toggle"><input id="minibia-bot-quick-panic-unknown" type="checkbox"/><span>Panic player</span></label>
+            <label class="mb-toggle"><input id="minibia-bot-quick-panic-health" type="checkbox"/><span>Panic HP</span></label>
+            <label class="mb-toggle"><input id="minibia-bot-quick-panic-return" type="checkbox"/><span>Panic return</span></label>
           </div>
           <div class="mb-quick-inline-tools">
             <label>Trusted name <input id="minibia-bot-quick-trusted-name" type="text" placeholder="Friend name"/></label>
@@ -11136,8 +11263,8 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
         <details class="mb-quick-group" id="minibia-bot-quick-group-chat">
           <summary>Gemini y respuestas <span class="mb-quick-group-sub">Default · privados · NPC</span></summary>
           <div class="mb-quick-settings">
-            <label class="mb-toggle"><input id="minibia-bot-quick-private" type="checkbox"/><span>Reply to private messages</span></label>
-            <label class="mb-toggle"><input id="minibia-bot-quick-npc" type="checkbox"/><span>Reply to nearby NPCs</span></label>
+            <label class="mb-toggle"><input id="minibia-bot-quick-private" type="checkbox"/><span>Reply PM</span></label>
+            <label class="mb-toggle"><input id="minibia-bot-quick-npc" type="checkbox"/><span>Reply NPC</span></label>
           </div>
           <div class="mb-quick-actions"><button id="minibia-bot-quick-test-gemini" type="button">TEST GEMINI (preview)</button></div>
           <div class="mb-small-note">Full prompt, API key and test message stay in Gemini / Auto Chat below. The preview does not send a game message.</div>
@@ -11145,9 +11272,9 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
         <details class="mb-quick-group" id="minibia-bot-quick-group-floor">
           <summary>Objetos raros del piso <span class="mb-quick-group-sub">mover · Rare · scan</span></summary>
           <div class="mb-quick-settings">
-            <label class="mb-toggle"><input id="minibia-bot-quick-floor-enabled" type="checkbox"/><span>Move matching floor items</span></label>
-            <label class="mb-toggle"><input id="minibia-bot-quick-floor-rares" type="checkbox"/><span>Include Rare items</span></label>
-            <label class="mb-toggle"><input id="minibia-bot-quick-floor-walk" type="checkbox"/><span>Walk to matching items</span></label>
+            <label class="mb-toggle"><input id="minibia-bot-quick-floor-enabled" type="checkbox"/><span>Move floor items</span></label>
+            <label class="mb-toggle"><input id="minibia-bot-quick-floor-rares" type="checkbox"/><span>Include Rare</span></label>
+            <label class="mb-toggle"><input id="minibia-bot-quick-floor-walk" type="checkbox"/><span>Walk to item</span></label>
           </div>
           <label class="mb-quick-route">Exact names / IDs <input id="minibia-bot-quick-floor-items" type="text" placeholder="crystal coin, 3035" /></label>
           <div class="mb-quick-actions"><button id="minibia-bot-quick-floor-scan" type="button">SCAN ITEMS</button></div>
@@ -11164,9 +11291,9 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
           </div>
           <div class="mb-quick-settings">
             <label class="mb-toggle"><input id="minibia-bot-quick-eat" type="checkbox"/><span>Auto Eat</span></label>
-            <label class="mb-toggle"><input id="minibia-bot-quick-invisible" type="checkbox"/><span>Auto Invisible</span></label>
+            <label class="mb-toggle"><input id="minibia-bot-quick-invisible" type="checkbox"/><span>Invisible</span></label>
             <label class="mb-toggle"><input id="minibia-bot-quick-shield" type="checkbox"/><span>Magic Shield</span></label>
-            <label class="mb-toggle"><input id="minibia-bot-quick-ring" type="checkbox"/><span>Equip Ring</span></label>
+            <label class="mb-toggle"><input id="minibia-bot-quick-ring" type="checkbox"/><span>Ring</span></label>
           </div>
           <div class="mb-quick-inline-tools">
             <label>Auto Heal minimum HP <input id="minibia-bot-quick-heal-hp" type="number" min="0"/></label>
@@ -11189,36 +11316,33 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
             <button id="minibia-bot-quick-loot-apply" type="button">APPLY LOOT</button>
           </div>
           <div class="mb-quick-settings">
-            <label class="mb-toggle"><input id="minibia-bot-quick-sell-enabled" type="checkbox"/><span>Verified NPC Auto Sell</span></label>
-            <label class="mb-toggle"><input id="minibia-bot-quick-sell-return" type="checkbox"/><span>Return to hunt after sale</span></label>
+            <label class="mb-toggle"><input id="minibia-bot-quick-sell-enabled" type="checkbox"/><span>Auto Sell</span></label>
+            <label class="mb-toggle"><input id="minibia-bot-quick-sell-return" type="checkbox"/><span>Return to hunt</span></label>
           </div>
           <label class="mb-quick-route">Seller items (whitelist) <input id="minibia-bot-quick-sell-items" type="text" placeholder="Brass Helmet"/></label>
           <div class="mb-small-note">Native Auto Loot is managed by Minibia. Sale never includes an item absent from the Seller whitelist. Use advanced settings for NPC name and route transitions.</div>
         </details>
       </div>
-      <div class="mb-small-note" id="minibia-bot-quick-status">Stopped. Open a group to edit its controls; all states are shared with advanced settings.</div>`;
+      <div class="mb-small-note" id="minibia-bot-quick-status">Listo para iniciar la caza.</div>`;
     panel.querySelector(".mb-body")?.prepend(quickBar);
-    for(const group of quickBar.querySelectorAll('.mb-quick-group')) {
-      const key='minibiaBot.quickHub.open.'+group.id;
-      group.open=bot.storage.get(key,false)===true;
-      group.addEventListener('toggle',()=>bot.storage.set(key,group.open));
+    // Keep ALL quick inputs in the DOM with unchanged IDs. No duplicate state or listeners.
+    // Convert the previous six nested disclosure panels into always-visible compact rows.
+    for (const group of Array.from(quickBar.querySelectorAll('.mb-quick-group'))) {
+      const title=group.querySelector(':scope > summary');
+      if (!title) continue;
+      const category=document.createElement('strong');
+      category.className='mb-quick-category';
+      category.textContent=title.firstChild?.textContent?.trim() || 'Opciones';
+      title.replaceWith(category);
+      const row=document.createElement('div');
+      row.className='mb-quick-group';
+      row.id=group.id;
+      while(group.firstChild) row.appendChild(group.firstChild);
+      group.replaceWith(row);
     }
+    // Keep lists, numeric thresholds and name fields directly visible, with compact sizing.
+    // They belong to the same window, not a separate Advanced mode.
 
-    function foldSections(columnClass, titleFor) {
-      const column = panel.querySelector(columnClass);
-      if (!column) return;
-      Array.from(column.children).forEach((section, idx) => {
-        if (!section.classList.contains("mb-column-section")) return;
-        const title = titleFor(section, idx);
-        if (!title) return;
-        const details = document.createElement("details");
-        details.className = "mb-fold";
-        const summary = document.createElement("summary");
-        summary.textContent = title;
-        details.append(summary, section);
-        column.append(details);
-      });
-    }
     // Reorganize existing nodes: controls retain their IDs, current values and listeners.
     const mainColumn = panel.querySelector(".mb-main-column");
     const sideColumn = panel.querySelector(".mb-side-column");
@@ -11270,9 +11394,10 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
         sideColumn.append(corpseSection);
       }
     }
-    const monitoring = document.createElement("details");
-    monitoring.className = "mb-fold mb-monitoring";
-    const monitorTitle = document.createElement("summary");
+    const monitoring = document.createElement("div");
+    monitoring.className = "mb-monitoring mb-flat-monitoring";
+    const monitorTitle = document.createElement("div");
+    monitorTitle.className = "mb-label";
     monitorTitle.textContent = "Anti Detection / Monitoring";
     monitoring.append(monitorTitle);
     const monitorIntro = document.createElement("div");
@@ -11281,9 +11406,10 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     monitoring.append(monitorIntro);
     function placeMonitor(section, title) {
       if (!section) return;
-      const sub = document.createElement("details");
-      sub.className = "mb-subfold";
-      const caption = document.createElement("summary");
+      const sub = document.createElement("section");
+      sub.className = "mb-flat-section";
+      const caption = document.createElement("div");
+      caption.className = "mb-label";
       caption.textContent = title;
       sub.append(caption, section);
       monitoring.append(sub);
@@ -11299,13 +11425,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     const loadedText = Array.from(mainColumn.children).find((child) =>
       child.classList.contains("mb-column-section") && !!child.querySelector(".mb-note"));
     if (mainUtilities && loadedText) mainUtilities.append(loadedText);
-    foldSections(".mb-cave-column", (section) => section.querySelector(":scope > .mb-label")?.textContent === "Auto Attack" ? "Combat / Auto Attack (advanced)" : "Waypoints / Seller / Auto Sell");
-    foldSections(".mb-side-column", (section) => ({"Xray":"Utility / Xray", "Auto Heal":"Survival / Auto Heal", "Auto Loot Corpses":"Loot / Corpses"})[section.querySelector(":scope > .mb-label")?.textContent] || "Additional Tools");
-    foldSections(".mb-main-column", (section) => {
-      if (section.querySelector("#minibia-bot-rune-enabled")) return "Supplies / Spells / Training";
-      if (section.querySelector("#minibia-bot-reload")) return "Reload Bot";
-      return "Additional Tools";
-    });
+    // No nested disclosure menus: all existing modules stay visible below Quick Hub.
     const emergencyButton = document.createElement("button");
     emergencyButton.id = "minibia-bot-emergency-stop";
     emergencyButton.type = "button";
@@ -11426,6 +11546,8 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     const quickStop = quickBar.querySelector('#minibia-bot-quick-stop');
     const quickStatus = quickBar.querySelector('#minibia-bot-quick-status');
     const quickSummary = quickBar.querySelector('#minibia-bot-quick-summary');
+    let quickStartWarning = '';
+    let quickStartWarningAt = 0;
     const quickControls={
       attack:quickBar.querySelector('#minibia-bot-quick-attack'),
       melee:quickBar.querySelector('#minibia-bot-quick-melee'),
@@ -11610,6 +11732,11 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
       if (!em?.halted && caveStatus.verificationLastRestoreAt &&
           Date.now()-caveStatus.verificationLastRestoreAt < 12000) {
         quickStatus.textContent=caveStatus.verificationLastRestore?.reason || 'Verification restore complete';
+        refreshQuickSummary();
+        return;
+      }
+      if (quickStartWarning && Date.now()-quickStartWarningAt<20000 && caveStatus.running) {
+        quickStatus.textContent='HUNT ACTIVA'+quickStartWarning;
         refreshQuickSummary();
         return;
       }
@@ -11829,24 +11956,45 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     });
     quickStart.addEventListener('click',()=>{
       const name=quickRoute.value;
-      if(!name||!bot.cave?.loadPreset?.(name)){quickStatus.textContent='Could not load selected route';return;}
+      if(!name){quickStatus.textContent='Elegí una ruta de caza primero.';return;}
+      const loaded=bot.cave?.loadPreset?.(name);
+      if(!loaded){quickStatus.textContent='No se pudo cargar la ruta: '+name;return;}
+      if(!Array.isArray(loaded.route)||!loaded.route.length){
+        quickStatus.textContent='La ruta '+name+' está vacía: grabá un waypoint antes de START HUNT.';
+        return;
+      }
       bot.storage.set('minibiaBot.quick.route',name);
-      // HUNT + SELLER is one shared switch, not a second start button.
-      if (bot.cave?.config?.autoSellerVisit === true) {
+      // A misconfigured seller must NEVER suppress normal Cave Bot movement.
+      // Disable only the seller trip until its route AND sale rules are configured.
+      let sellerWarning='';
+      if(bot.cave?.config?.autoSellerVisit===true){
         const info=bot.cave?.status?.()?.sellerRouteInfo;
-        if (!info?.valid) {
-          quickStatus.textContent='HUNT + SELLER: invalid Shanar route. Select a connected seller preset or turn OFF HUNT + SELLER for normal hunt.';
-          return;
+        const sales=bot.autoSell?.status?.()?.config||{};
+        if(!info?.valid){
+          sellerWarning=' · SHANAR PENDIENTE: ruta de vendedor inválida (HUNT + SELLER desactivado)';
+        } else if(!sales.enabled||!String(sales.allowedItems||'').trim()||!sales.autoReturnAfterSale){
+          sellerWarning=' · SHANAR PENDIENTE: verificá Auto Sell, lista permitida y retorno (HUNT + SELLER desactivado)';
         }
-        const sales=bot.autoSell?.status?.()?.config;
-        if (!sales?.enabled || !String(sales.allowedItems || '').trim() || !sales.autoReturnAfterSale) {
-          quickStatus.textContent='HUNT + SELLER: enable verified Auto Sell, set allowed items and enable Return to hunt after sales.';
-          return;
+        if(sellerWarning){
+          bot.cave.updateConfig({autoSellerVisit:false});
         }
       }
       bot.emergencyDismiss?.();
-      const ok=bot.cave?.status?.()?.running || bot.cave?.start?.();
-      quickStatus.textContent=ok ? (bot.cave?.config?.autoSellerVisit ? 'HUNT + SELLER started: '+name : 'Normal hunt started: '+name) : 'Could not start Cave Bot';
+      let ok=false;
+      try {ok=!!bot.cave?.start?.();} catch(e) {
+        console.error('[minibia-bot] START HUNT failed',e);
+        quickStatus.textContent='START HUNT ERROR: '+(e?.message||String(e));
+        return;
+      }
+      // Cave start alone is enough to walk waypoints; don't override manually selected modules.
+      quickStartWarning=ok?sellerWarning:'';
+      quickStartWarningAt=Date.now();
+      const caveNow=bot.cave?.status?.()||{};
+      const safetyHold=ok && caveNow.pausedForVerification ?
+        ' · PAUSADA POR CAPTCHA: resolvé el aviso y pulsá RESTORE CAPTCHA' :
+        (ok && caveNow.moderatorPaused ? ' · PAUSADA POR ALERTA GM' : '');
+      quickStatus.textContent=ok ? ('HUNT INICIADA: '+name+sellerWarning+safetyHold) :
+        ('No inició Cave Bot · '+(caveNow.lastRoutePathError||'revisá alertas, waypoint y Console'));
       refreshQuickSummary();
       refreshEntryCount();
     });
