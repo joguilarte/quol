@@ -1433,6 +1433,94 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
       }
       #minibia-bot-panel .mb-body[hidden] {display:none!important;}
     `;
+    style.textContent += `
+      #minibia-bot-panel .mb-body {display:flex!important;flex-direction:column!important;gap:0!important;min-width:0!important;overflow-x:hidden!important;}
+      #minibia-bot-panel .mb-quick-bar {display:flex!important;flex-direction:column!important;gap:9px!important;
+        width:100%!important;max-width:100%!important;box-sizing:border-box!important;align-items:stretch!important;height:auto!important;}
+      #minibia-bot-panel #minibia-bot-wiring-dock {display:none!important;}
+      #minibia-bot-panel .mb-quick-routes {display:grid!important;grid-template-columns:repeat(3,minmax(0,1fr))!important;gap:8px!important;}
+      #minibia-bot-panel .mb-essential-heal {display:grid!important;grid-template-columns:repeat(4,minmax(0,1fr))!important;
+        gap:7px!important;margin:1px 0 2px!important;}
+      #minibia-bot-panel .mb-essential-heal label {font-size:11px!important;display:flex!important;gap:4px!important;align-items:center!important;min-width:0!important;}
+      #minibia-bot-panel .mb-essential-heal input {width:100%!important;min-width:0!important;max-width:95px!important;box-sizing:border-box!important;}
+      #minibia-bot-panel .mb-quick-tools {display:grid!important;grid-template-columns:repeat(2,minmax(0,1fr))!important;
+        column-count:initial!important;gap:8px!important;align-items:start!important;height:auto!important;}
+      #minibia-bot-panel .mb-quick-tools>.mb-quick-group {break-inside:auto!important;display:flex!important;
+        flex-direction:column!important;gap:6px!important;height:auto!important;min-width:0!important;margin:0!important;align-self:start!important;}
+      #minibia-bot-panel #minibia-bot-quick-group-alerts {grid-column:1/-1!important;}
+      #minibia-bot-panel .mb-quick-group .mb-quick-inline-tools,
+      #minibia-bot-panel .mb-quick-group .mb-quick-settings {display:flex!important;flex-wrap:wrap!important;
+        align-items:center!important;justify-content:flex-start!important;gap:5px 10px!important;}
+      #minibia-bot-panel .mb-quick-group .mb-quick-settings label.mb-toggle {white-space:normal!important;}
+      #minibia-bot-panel .mb-quick-group textarea {height:53px!important;min-height:40px!important;max-height:90px!important;resize:vertical!important;}
+      #minibia-bot-panel .mb-gemini-quick-config {margin-top:5px!important;width:100%!important;min-width:0!important;}
+      #minibia-bot-panel .mb-gemini-quick-config>.mb-stack {display:grid!important;grid-template-columns:repeat(2,minmax(0,1fr))!important;
+        align-items:start!important;gap:6px!important;}
+      #minibia-bot-panel #minibia-bot-talk-ai-settings {grid-column:1/-1!important;display:grid!important;
+        grid-template-columns:minmax(150px,1fr) minmax(210px,2fr)!important;gap:8px!important;}
+      #minibia-bot-panel .mb-quick-gemini-test {grid-column:1/-1!important;}
+      #minibia-bot-panel .mb-quick-monitor-lists {display:flex!important;flex-wrap:wrap!important;
+        gap:7px!important;align-items:center!important;border-bottom:1px solid rgba(200,175,120,.2);padding:3px 0 6px!important;}
+      #minibia-bot-panel .mb-quick-monitor-lists .mb-list {display:flex!important;flex-wrap:wrap!important;gap:4px!important;max-height:80px;overflow:auto;}
+      #minibia-bot-panel .mb-quick-name-list {display:flex!important;gap:6px!important;align-items:center!important;}
+      #minibia-bot-panel .mb-quick-name-list strong {font-size:11px!important;}
+      #minibia-bot-panel .mb-quick-monitor-lists #minibia-bot-set-home {width:auto!important;min-width:120px!important;
+        max-width:160px!important;flex:0 0 auto!important;padding:5px 12px!important;}
+      #minibia-bot-panel .mb-quick-combat-extras {display:flex!important;flex-wrap:wrap!important;gap:10px!important;align-items:end!important;}
+      #minibia-bot-panel .mb-quick-eat-key {min-width:130px!important;max-width:160px!important;}
+      #minibia-bot-panel .mb-quick-xray {margin-top:7px!important;border-top:1px solid rgba(200,175,120,.3)!important;
+        padding-top:6px!important;background:none!important;border-left:0!important;border-right:0!important;border-bottom:0!important;}
+      #minibia-bot-panel #minibia-bot-visible-creatures-list {max-height:120px!important;overflow:auto!important;}
+      #minibia-bot-panel .mb-quick-cave-dock {border:1px solid rgba(200,175,120,.45)!important;
+        border-radius:7px!important;padding:9px!important;margin-top:6px!important;box-sizing:border-box!important;min-width:0!important;}
+      #minibia-bot-panel .mb-main-cave-section {padding:0!important;margin:0!important;border:0!important;background:none!important;}
+      #minibia-bot-panel .mb-main-cave-section>.mb-stack {display:grid!important;
+        grid-template-columns:repeat(2,minmax(0,1fr))!important;gap:8px 13px!important;align-items:start!important;}
+      #minibia-bot-panel .mb-main-cave-section>.mb-stack> * {min-width:0!important;align-self:start!important;margin:0!important;}
+      #minibia-bot-panel .mb-main-cave-section .mb-cave-help {display:none!important;}
+      #minibia-bot-panel .mb-main-cave-section textarea {max-height:100px!important;min-height:50px!important;resize:vertical!important;}
+      #minibia-bot-panel .mb-cave-card {display:flex!important;flex-direction:column!important;
+        justify-content:flex-start!important;align-items:stretch!important;gap:7px!important;
+        min-width:0!important;margin:0!important;padding:9px!important;
+        border:1px solid rgba(200,175,120,.23)!important;border-radius:6px!important;
+        height:auto!important;break-inside:avoid!important;}
+      #minibia-bot-panel .mb-cave-card>.mb-actions {display:flex!important;flex-wrap:wrap!important;gap:5px!important;}
+      #minibia-bot-panel .mb-cave-card>.mb-field-grid {display:grid!important;grid-template-columns:1fr!important;}
+      #minibia-bot-panel .mb-cave-card label {min-width:0!important;}
+      #minibia-bot-panel .mb-quick-corpse {grid-column:auto!important;margin:0!important;}
+      #minibia-bot-panel .mb-quick-cave-dock .mb-label {font-size:12px!important;font-weight:700!important;color:#e2ce9c!important;}
+      #minibia-bot-panel .mb-quick-reload {margin-top:7px!important;max-width:160px!important;}
+      #minibia-bot-panel .mb-main-cave-section .mb-actions {min-width:0!important;}
+      #minibia-bot-panel .mb-main-cave-section .mb-field {min-width:0!important;}
+      #minibia-bot-panel .mb-main-cave-section input,#minibia-bot-panel .mb-main-cave-section select {max-width:100%!important;box-sizing:border-box!important;}
+      @container (max-width:800px) {
+        #minibia-bot-panel .mb-quick-routes {grid-template-columns:1fr!important;}
+        #minibia-bot-panel .mb-quick-tools {grid-template-columns:1fr!important;}
+        #minibia-bot-panel .mb-main-cave-section>.mb-stack {grid-template-columns:1fr!important;}
+        #minibia-bot-panel .mb-essential-heal {grid-template-columns:repeat(2,minmax(0,1fr))!important;}
+      }
+      @container (max-width:570px) {
+        #minibia-bot-panel #minibia-bot-talk-ai-settings {grid-template-columns:1fr!important;}
+        #minibia-bot-panel .mb-gemini-quick-config>.mb-stack {grid-template-columns:1fr!important;}
+      }
+    `;
+    // Stop the saved floating panel from expanding beyond the compact layout.
+    // Keeps the SAME controls/sections; no second layout, no duplicate UI.
+    style.textContent += `
+      #minibia-bot-panel:not([data-collapsed="true"]) {
+        max-width: min(1120px, calc(100vw - 24px)) !important;
+      }
+      #minibia-bot-panel .mb-quick-tools,
+      #minibia-bot-panel .mb-advanced-columns,
+      #minibia-bot-panel .mb-main-cave-section > .mb-stack {
+        align-content: start !important;
+      }
+      #minibia-bot-panel .mb-quick-group,
+      #minibia-bot-panel .mb-cave-card {
+        height: max-content !important;
+        min-height: 0 !important;
+      }
+    `;
     document.head.appendChild(style);
 
     const panel = document.createElement("div");
@@ -2077,7 +2165,182 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     const loadedText = Array.from(mainColumn.children).find((child) =>
       child.classList.contains("mb-column-section") && !!child.querySelector(".mb-note"));
     if (mainUtilities && loadedText) mainUtilities.append(loadedText);
-    // No nested disclosure menus: all existing modules stay visible below Quick Hub.
+
+    // SINGLE-SURFACE UX: no extra legacy panels, no duplicated visible controls.
+    // Existing quick checkboxes remain the ONLY visible toggles. Original DOM controls
+    // stay mounted in the invisible wiring dock so legacy listeners still work.
+    const wiringDock=document.createElement('div');
+    wiringDock.id='minibia-bot-wiring-dock';
+    wiringDock.hidden=true;
+    wiringDock.setAttribute('aria-hidden','true');
+    quickBar.append(wiringDock);
+    // Lift all four heal settings from Training into the always-visible Essentials.
+    const healFields=quickBar.querySelector('#minibia-bot-quick-heal-hp')?.closest('.mb-quick-inline-tools');
+    const essentialsCore=quickBar.querySelector('.mb-quick-core');
+    if(healFields && essentialsCore){
+      healFields.classList.add('mb-essential-heal');
+      essentialsCore.after(healFields);
+      for(const label of healFields.querySelectorAll('label')){
+        const textNode=Array.from(label.childNodes).find(n=>n.nodeType===Node.TEXT_NODE && n.nodeValue.trim());
+        if(textNode)textNode.nodeValue=textNode.nodeValue.replace('Auto Heal minimum HP','Heal HP ≤')
+          .replace('Auto Heal minimum Mana','Mana ≤')
+          .replace('HP hotkey (1–12)','HP key')
+          .replace('Mana hotkey (1–12)','Mana key');
+      }
+    }
+    // Group advanced Talk API/settings into the real Anti Detection group (already
+    // reparented above). Keep its ONE set of inputs and events.
+    const antiDetection=quickBar.querySelector('#minibia-bot-quick-group-alerts');
+    const antiSettings=antiDetection?.querySelector('.mb-quick-inline-tools');
+    // Show actual saved GM/trusted lists and the emergency Home without a second Monitoring section.
+    const oldPanic=monitoring.querySelector('#minibia-bot-set-home')?.closest('.mb-column-section');
+    const oldGM=monitoring.querySelector('#minibia-bot-panic-gm-list')?.closest('.mb-column-section');
+    if(antiSettings && oldPanic){
+      const homeInfo=oldPanic.querySelector('#minibia-bot-home');
+      const homeButton=oldPanic.querySelector('#minibia-bot-set-home');
+      const trusted=oldPanic.querySelector('#minibia-bot-panic-trusted-list');
+      const inline=document.createElement('div');inline.className='mb-quick-monitor-lists';
+      if(homeButton && homeInfo)inline.append(homeButton,homeInfo);
+      if(trusted){
+        const wrap=document.createElement('div');wrap.className='mb-quick-name-list';
+        const label=document.createElement('strong');label.textContent='Trusted';
+        wrap.append(label,trusted);inline.append(wrap);
+      }
+      if(oldGM){
+        const gm=oldGM.querySelector('#minibia-bot-panic-gm-list');
+        if(gm){const wrap=document.createElement('div');wrap.className='mb-quick-name-list';
+          const label=document.createElement('strong');label.textContent='GM';
+          wrap.append(label,gm);inline.append(wrap);}
+      }
+      antiSettings.after(inline);
+    }
+    // These original Talk toggles are already mirrored by the visible Essentials
+    // controls. Do not render the same choices twice in Anti Detection.
+    if(originalTalk){
+      for(const id of ['minibia-bot-talk-enabled','minibia-bot-talk-gemini-alarm',
+                        'minibia-bot-talk-npc-replies','minibia-bot-talk-private-replies']){
+        const toggle=originalTalk.querySelector('#'+id);
+        const holder=toggle?.closest('label');
+        if(holder)wiringDock.append(holder);
+      }
+      // The Gemini failure explanatory note follows the old toggle and is redundant.
+      const verbose=Array.from(originalTalk.querySelectorAll('.mb-small-note'))
+        .find(node=>node.textContent.includes('Sounds the usual alarm on API error'));
+      if(verbose)wiringDock.append(verbose);
+    }
+    if(antiDetection && noticeSection){
+      const noticeTick=noticeSection.querySelector('#minibia-bot-cave-verification-tick')?.closest('label');
+      if(noticeTick){noticeTick.classList.add('mb-compact-notice-tick');antiDetection.append(noticeTick);}
+    }
+    // ML/supplies only need one extra parameter missing from the Quick row.
+    const training=quickBar.querySelector('#minibia-bot-quick-group-training');
+    const eatHotkey=mainUtilities?.querySelector('#minibia-bot-auto-eat-hotkey')?.closest('label');
+    if(training && eatHotkey){eatHotkey.classList.add('mb-quick-eat-key');
+      training.querySelector('.mb-quick-settings')?.append(eatHotkey);}
+    // Xray is its own utility, but lives inside the Quick Floor group, not far below.
+    const floorQuick=quickBar.querySelector('#minibia-bot-quick-group-floor');
+    const realXray=getSection(sideColumn,'Xray');
+    if(floorQuick && realXray){
+      const title=realXray.querySelector(':scope > .mb-label');
+      if(title)title.textContent='Xray';
+      realXray.classList.add('mb-quick-xray');floorQuick.append(realXray);
+    }
+    // Cave Bot is the ONLY large detailed section, with routes, waypoints, loot
+    // and seller configuration, all in one place and all original event handlers.
+    const caveDock=document.createElement('div');
+    caveDock.id='minibia-bot-cave-dock';
+    caveDock.className='mb-quick-cave-dock';
+    caveDock.setAttribute('aria-label','Cave Bot: waypoints, loot and seller');
+    quickBar.append(caveDock);
+    const caveBody=caveSection?.querySelector(':scope > .mb-stack');
+    if(caveSection){caveSection.classList.add('mb-main-cave-section');caveDock.append(caveSection);}
+    if(caveBody && corpseSection){corpseSection.classList.add('mb-quick-corpse');caveBody.append(corpseSection);}
+    // Combat-only fields not in Essentials are available in Cave Bot.
+    const attackSection=getSection(caveColumn,'Auto Attack');
+    if(caveBody && attackSection){
+      const extra=document.createElement('div');extra.className='mb-quick-combat-extras';
+      const title=document.createElement('div');title.className='mb-label';title.textContent='Combat · detalles';
+      extra.append(title);
+      for(const id of ['minibia-bot-auto-attack-hotkey','minibia-bot-auto-attack-rune-hotkey']){
+        const label=attackSection.querySelector('#'+id)?.closest('label');
+        if(label)extra.append(label);
+      }
+      caveBody.append(extra);
+    }
+    // Keep existing Quick buttons/inputs mounted for event mirroring, but show
+    // only Cave Bot's original controls for waypoints and movement.
+    for(const id of ['minibia-bot-quick-group-navigation','minibia-bot-quick-group-waypoints']){
+      const oldQuick=quickBar.querySelector('#'+id);if(oldQuick)wiringDock.append(oldQuick);
+    }
+    // Hide only DUPLICATE Cave Bot widgets present in Essentials; retain the exact
+    // elements in wiringDock for current direct/legacy event handlers.
+    if(caveBody){
+      for(const id of ['minibia-bot-seller-enabled','minibia-bot-seller-cap','minibia-bot-seller-route']){
+        const control=caveBody.querySelector('#'+id);
+        const holder=control?.closest('label');if(holder)wiringDock.append(holder);
+      }
+      const existingCaveStart=caveBody.querySelector('#minibia-bot-cave-start')?.closest('.mb-actions');
+      if(existingCaveStart)wiringDock.append(existingCaveStart);
+      // No repeated descriptive walls of text between routine controls.
+      for(const note of caveBody.querySelectorAll('.mb-small-note')){
+        if(note.id)continue;
+        note.classList.add('mb-cave-help');
+      }
+    }
+    // Group the ORIGINAL Cave Bot fields into coherent cards. Splitting each
+    // standalone label into a CSS grid cell was the cause of the previous UI chaos.
+    if(caveBody){
+      const makeCard=(name)=>{
+        const card=document.createElement('div');card.className='mb-cave-card';
+        card.dataset.section=name;return card;
+      };
+      const routeCard=makeCard('waypoints');
+      const movementCard=makeCard('movement');
+      const movementHeading=document.createElement('strong');movementHeading.textContent='Movimiento, persecución y escaleras';
+      movementHeading.className='mb-label';movementCard.append(movementHeading);
+      const sellerCard=makeCard('seller-route');
+      const saleCard=makeCard('auto-sell');
+      const lootCard=makeCard('native-loot');
+      let activeCard=routeCard;
+      const corpseCard=caveBody.querySelector('.mb-quick-corpse');
+      const combatCard=caveBody.querySelector('.mb-quick-combat-extras');
+      for(const child of Array.from(caveBody.children)){
+        if(child===corpseCard||child===combatCard)continue;
+        if(child.querySelector?.('#minibia-bot-cave-moderator-pause')){
+          // The same control is already visible in Anti Detection.
+          wiringDock.append(child);continue;
+        }
+        if(child.querySelector?.('#minibia-bot-cave-prioritize-monsters'))activeCard=movementCard;
+        if(child.classList.contains('mb-label')){
+          const label=child.textContent.trim();
+          if(label==='Seller Return (capacity)')activeCard=sellerCard;
+          else if(label.startsWith('Auto Sell ('))activeCard=saleCard;
+          else if(label.startsWith('Minibia Native Auto Loot'))activeCard=lootCard;
+        }
+        if(child.id==='minibia-bot-cave-status')activeCard=routeCard;
+        if(child.id==='minibia-bot-seller-status')activeCard=sellerCard;
+        activeCard.append(child);
+      }
+      for(const card of [routeCard,movementCard,saleCard,lootCard,sellerCard]){
+        if(card.childElementCount)caveBody.append(card);
+      }
+      if(corpseCard){corpseCard.classList.add('mb-cave-card');caveBody.append(corpseCard);}
+      if(combatCard){combatCard.classList.add('mb-cave-card');caveBody.append(combatCard);}
+    }
+    // One refreshable Auto Heal group in Essentials, one Gemini configuration,
+    // one Anti Detection, one Cave Bot. Keep the remaining original nodes mounted,
+    // invisible, because event bindings query them by ID after this point.
+    for(const column of [mainColumn,sideColumn,caveColumn])wiringDock.append(column);
+    if(monitoring?.isConnected)wiringDock.append(monitoring);
+    if(advancedColumns?.isConnected)advancedColumns.remove();
+    // The Reload control is useful but should not occupy a whole duplicated panel.
+    const reload=panel.querySelector('#minibia-bot-reload');
+    if(reload){reload.classList.add('mb-quick-reload');caveDock.append(reload);}
+    const previousCaption=quickBar.querySelector('.mb-quick-head .mb-quick-hint');
+    if(previousCaption)previousCaption.textContent='Activá lo necesario y presioná START HUNT';
+    if(quickBar.querySelector('#minibia-bot-quick-resume-notice'))
+      quickBar.querySelector('#minibia-bot-quick-resume-notice').textContent='REANUDAR TRAS CAPTCHA';
+    // No nested disclosure menus: all functional sections stay in this one window.
     const emergencyButton = document.createElement("button");
     emergencyButton.id = "minibia-bot-emergency-stop";
     emergencyButton.type = "button";

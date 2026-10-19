@@ -5595,8 +5595,12 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
       state.lastRoutePathErrorAt=now;
       if (now-state.lastRouteRecoveryWarningAt>=8000) {
         state.lastRouteRecoveryWarningAt=now;
+        const trip = state.sellerTrip;
         bot.log('cave blocked unsafe/unavailable path; waypoint unchanged',
-          {waypoint,index:state.currentIndex+1,reason:result.reason});
+          {from, waypoint, index:trip ? trip.index + 1 : state.currentIndex+1,
+           sellerPhase:trip?.phase || null, sellerPreset:trip?.sellerPresetName || null,
+           reason:result.reason,
+           advice: trip ? 'Revisá este tramo y grabá waypoints intermedios en terreno transitable; no se habilita mapclick inseguro.' : undefined});
       }
       return false;
     }
@@ -6768,9 +6772,11 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
       const endpoint = trip.sellerRoute?.[trip.sellerRoute.length - 1];
       const name = String(bot.autoSell?.config?.npcName || '').trim().toLowerCase();
       const npcType = window.CONST?.TYPES?.NPC ?? 2;
-      const adjacent = endpoint && position && position.z === endpoint.z &&
-        Math.max(Math.abs(position.x-endpoint.x), Math.abs(position.y-endpoint.y)) <= 2;
-      const npcNearby = adjacent && !!name &&
+      // An NPC can stand several tiles away from the saved endpoint (the
+      // player's recorded tile, not the NPC tile). Verify the real NPC by
+      // type/name/floor/range; do not make sale depend on exact waypoint XY.
+      const correctFloor = endpoint && position && position.z === endpoint.z;
+      const npcNearby = correctFloor && !!name &&
         Object.values(window.gameClient?.world?.activeCreatures || {}).some((npc) => {
           const p = npc?.getPosition?.() || npc?.__position;
           return npc?.type === npcType && String(npc.name || '').trim().toLowerCase() === name &&
@@ -6784,6 +6790,33 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
         state.lastPathAt = 0;
         bot.log('seller reached at recorded endpoint; merchant interaction ready',
           { npc: bot.autoSell.config.npcName, autoSellEnabled: bot.autoSell.config.enabled === true });
+      }
+    }
+    // Final approach to the verified Shanar NPC via validated same-floor moves.
+    if (trip.kind !== 'home' && (trip.phase === 'exit-hunt' || trip.phase === 'seller-out') &&
+        position?.z === trip.sellerRoute?.[trip.sellerRoute.length - 1]?.z) {
+      const expectedName = String(bot.autoSell?.config?.npcName || '').trim().toLowerCase();
+      const npcType = window.CONST?.TYPES?.NPC ?? 2;
+      const merchant = Object.values(window.gameClient?.world?.activeCreatures || {}).find((c) => {
+        const p = c?.getPosition?.() || c?.__position;
+        return c?.type === npcType && String(c.name || '').trim().toLowerCase() === expectedName &&
+          p?.z === position.z && Math.max(Math.abs(p.x-position.x),Math.abs(p.y-position.y)) <= 8;
+      });
+      const mp = merchant?.getPosition?.() || merchant?.__position;
+      if (mp && Date.now() - (trip.lastMerchantApproachAt || 0) > 1800) {
+        trip.lastMerchantApproachAt = Date.now();
+        const choices = [
+          {x:0,y:-1},{x:1,y:0},{x:0,y:1},{x:-1,y:0},
+          {x:-1,y:-1},{x:1,y:-1},{x:-1,y:1},{x:1,y:1},
+        ].map(({x,y}) => ({x:mp.x+x,y:mp.y+y,z:mp.z}))
+          .sort((a,b) => Math.max(Math.abs(a.x-position.x),Math.abs(a.y-position.y)) -
+            Math.max(Math.abs(b.x-position.x),Math.abs(b.y-position.y)));
+        for (const tile of choices) {
+          if (!bot.safeNavigation?.plan?.(position,tile,
+              {exactOnly:true,maxSteps:10,searchSteps:48,maxNodes:1800})?.ok) continue;
+          if (goToWaypoint(tile)) return true;
+          break;
+        }
       }
     }
     syncSellerEscortCombat(trip);
@@ -9309,6 +9342,9 @@ window.__minibiaBotBundle.installAutoSellModule = function installAutoSellModule
     previousTrip: null,
     manualSession: false,
     lastSelection: null,
+    inspectedNestedItems: new WeakSet(),
+    pendingNestedOpen: null,
+    nestedOpens: 0,
   };
   let timerId = null;
   const norm = (s) => String(s || "").trim().toLocaleLowerCase().replace(/\s+/g, " ");
@@ -9374,6 +9410,9 @@ window.__minibiaBotBundle.installAutoSellModule = function installAutoSellModule
     state.lastNpcInteractAt = 0;
     state.lastNpcTradeAt = 0;
     state.lastSelection = null;
+    state.inspectedNestedItems = new WeakSet();
+    state.pendingNestedOpen = null;
+    state.nestedOpens = 0;
   }
   function pause(reason) {
     state.phase = "needs-attention";
@@ -9404,6 +9443,63 @@ window.__minibiaBotBundle.installAutoSellModule = function installAutoSellModule
     }
     return true;
   }
+  // The game exposes only OPEN containers. At the merchant, open nested bags
+  // one-by-one using the same non-destructive ItemUsePacket as the client.
+  // Do not declare a completed sale while an inner bag remains uninspected.
+  function inspectNestedBackpacks(now) {
+    const opened = Array.from(window.gameClient?.player?.__openedContainers || []);
+    if (!opened.length) { pause('No open backpacks; open your main backpack'); return false; }
+    const currentIds = new Set(opened.map((c) => c.__containerId));
+    const pending = state.pendingNestedOpen;
+    if (pending) {
+      const arrived = [...currentIds].some((id) => !pending.previousIds.has(id));
+      if (!arrived) {
+        if (now - pending.at > 4500) {
+          state.pendingNestedOpen = null;
+          pause('Nested backpack could not be opened/verified. Open inner backpacks manually before retrying');
+        }
+        return false;
+      }
+      state.pendingNestedOpen = null;
+      state.lastActionAt = now;
+      return false; // Allow the new server-provided slots to settle.
+    }
+    if (now - state.lastActionAt < 1100) return false;
+    for (const container of opened) {
+      // Never traverse a depot or inbox container during an NPC visit.
+      if (container?.__containerId === window.CONST?.CONTAINER?.DEPOT ||
+          !Array.isArray(container?.slots)) continue;
+      for (let slotIndex = 0; slotIndex < container.slots.length; slotIndex++) {
+        const item = container.getSlotItem?.(slotIndex);
+        if (!item || typeof item.isContainer !== 'function' || !item.isContainer() ||
+            state.inspectedNestedItems.has(item)) continue;
+        // A small hard ceiling protects against pathological nested containers
+        // or client models that replace item objects after each opening.
+        if (state.nestedOpens >= 12) {
+          pause('Nested backpack scan limit reached (12); inspect remaining bags manually');
+          return false;
+        }
+        if (typeof ItemUsePacket !== 'function' || typeof window.gameClient?.send !== 'function') {
+          pause('Cannot inspect nested backpacks in this client; open them manually');
+          return false;
+        }
+        state.inspectedNestedItems.add(item);
+        state.nestedOpens++;
+        state.pendingNestedOpen = { previousIds: currentIds, at: now };
+        state.phase = 'opening-nested-backpack';
+        try { window.gameClient.send(new ItemUsePacket({ which:container, index:slotIndex })); }
+        catch(error) {
+          state.pendingNestedOpen = null;
+          pause('Could not open nested backpack: ' + String(error?.message || error));
+          return false;
+        }
+        bot.log('auto sell inspecting nested backpack', { containerId:container.__containerId, slot:slotIndex });
+        return false;
+      }
+    }
+    return true;
+  }
+
   function selectAndSell(modal, now) {
     const selectedItems = allowed();
     if (!selectedItems.size) return pause("No allowed item names configured"), false;
@@ -9504,6 +9600,7 @@ window.__minibiaBotBundle.installAutoSellModule = function installAutoSellModule
       });
       return true;
     }
+    if (sawUnavailable && !inspectNestedBackpacks(now)) return false;
     if (sawUnavailable && state.sold > 0) {
       // Only close the NPC trade modal after every allowed item has been
       // inspected and at least one server-confirmed inventory decrement exists.
@@ -9614,6 +9711,9 @@ window.__minibiaBotBundle.installAutoSellModule = function installAutoSellModule
       sold: state.sold, attempted: state.attempted, pending: state.pending ? {
         item: state.pending.offer.name, quantity: state.pending.quantity } : null,
       lastSelection: state.lastSelection ? {...state.lastSelection} : null,
+      nestedBackpacksInspected: state.nestedOpens,
+      inspectingNestedBackpack: !!state.pendingNestedOpen,
+      openBackpacks: window.gameClient?.player?.__openedContainers?.size || 0,
       config: {...config} };
   }
   function reset() { resetTrip(); state.manualSession = false; state.previousTrip = null; }
@@ -11127,6 +11227,23 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
       @container (max-width:570px) {
         #minibia-bot-panel #minibia-bot-talk-ai-settings {grid-template-columns:1fr!important;}
         #minibia-bot-panel .mb-gemini-quick-config>.mb-stack {grid-template-columns:1fr!important;}
+      }
+    `;
+    // Stop the saved floating panel from expanding beyond the compact layout.
+    // Keeps the SAME controls/sections; no second layout, no duplicate UI.
+    style.textContent += `
+      #minibia-bot-panel:not([data-collapsed="true"]) {
+        max-width: min(1120px, calc(100vw - 24px)) !important;
+      }
+      #minibia-bot-panel .mb-quick-tools,
+      #minibia-bot-panel .mb-advanced-columns,
+      #minibia-bot-panel .mb-main-cave-section > .mb-stack {
+        align-content: start !important;
+      }
+      #minibia-bot-panel .mb-quick-group,
+      #minibia-bot-panel .mb-cave-card {
+        height: max-content !important;
+        min-height: 0 !important;
       }
     `;
     document.head.appendChild(style);
