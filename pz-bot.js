@@ -10930,6 +10930,74 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
       @container (max-width:1060px) { #minibia-bot-panel .mb-quick-bar { grid-column:1 / -1; grid-row: 1; }
         #minibia-bot-panel .mb-cave-column {grid-row:2;} #minibia-bot-panel .mb-side-column {grid-row:2;} #minibia-bot-panel .mb-main-column {grid-row:3;} }
     `;
+
+    style.textContent += `
+      /* Definitive single-window layout. The old grid row and CSS columns must not overlap. */
+      #minibia-bot-panel .mb-body {display:flex!important;flex-direction:column!important;align-items:stretch!important;
+        gap:12px!important;min-width:0!important;overflow-x:hidden!important;}
+      #minibia-bot-panel .mb-body > .mb-quick-bar,
+      #minibia-bot-panel .mb-body > .mb-advanced-columns {position:relative!important;grid-row:auto!important;
+        grid-column:auto!important;order:0!important;flex:0 0 auto!important;width:100%!important;min-width:0!important;}
+      #minibia-bot-panel .mb-advanced-columns {display:grid!important;grid-template-columns:repeat(3,minmax(0,1fr))!important;
+        gap:12px!important;align-items:start!important;align-content:start!important;}
+      #minibia-bot-panel .mb-advanced-columns > .mb-main-column,
+      #minibia-bot-panel .mb-advanced-columns > .mb-side-column,
+      #minibia-bot-panel .mb-advanced-columns > .mb-cave-column {grid-row:auto!important;grid-column:auto!important;
+        order:0!important;align-self:start!important;position:static!important;min-width:0!important;width:auto!important;}
+      #minibia-bot-panel .mb-quick-bar {display:flex!important;flex-direction:column!important;align-items:stretch!important;
+        gap:9px!important;min-width:0!important;height:auto!important;}
+      #minibia-bot-panel .mb-quick-routes {display:grid!important;grid-template-columns:repeat(3,minmax(0,1fr))!important;gap:7px!important;}
+      #minibia-bot-panel .mb-quick-tools {display:block!important;column-count:2!important;
+        column-gap:10px!important;height:auto!important;min-height:0!important;}
+      #minibia-bot-panel .mb-quick-tools > .mb-quick-group {break-inside:avoid!important;
+        display:flex!important;flex-direction:column!important;gap:6px!important;
+        margin:0 0 10px!important;padding:8px!important;width:100%!important;height:auto!important;
+        align-self:start!important;box-sizing:border-box!important;}
+      #minibia-bot-panel .mb-quick-group .mb-quick-category {font-size:12px!important;line-height:1.4;}
+      #minibia-bot-panel .mb-quick-group .mb-quick-settings {display:flex!important;flex-wrap:wrap!important;
+        align-items:center!important;justify-content:flex-start!important;gap:6px 12px!important;}
+      #minibia-bot-panel .mb-quick-core {gap:6px 12px!important;}
+      #minibia-bot-panel .mb-quick-settings .mb-toggle {white-space:normal!important;line-height:1.3!important;}
+      #minibia-bot-panel .mb-quick-tools textarea {max-height:68px!important;min-height:30px!important;resize:vertical;}
+      #minibia-bot-panel .mb-gemini-compact-heading {border-top:1px solid rgba(224,200,148,.28);
+        font-size:12px;font-weight:bold;padding:8px 0 0;margin-top:4px;color:#e9d6a4;}
+      #minibia-bot-panel .mb-gemini-quick-config {padding:0!important;margin:0!important;border:0!important;min-width:0!important;}
+      #minibia-bot-panel .mb-gemini-quick-config > .mb-stack {display:grid!important;
+        grid-template-columns:repeat(2,minmax(0,1fr))!important;gap:7px!important;align-items:start!important;}
+      #minibia-bot-panel .mb-gemini-quick-config .mb-stack > * {min-width:0!important;}
+      #minibia-bot-panel .mb-gemini-quick-config #minibia-bot-talk-ai-settings {grid-column:1 / -1;
+        display:grid!important;grid-template-columns:minmax(150px,1fr) minmax(210px,2fr)!important;gap:8px!important;}
+      #minibia-bot-panel .mb-gemini-quick-config #minibia-bot-talk-ai-settings input,
+      #minibia-bot-panel .mb-gemini-quick-config #minibia-bot-talk-ai-settings textarea {width:100%!important;min-width:0!important;
+        box-sizing:border-box!important;margin:0!important;}
+      #minibia-bot-panel .mb-gemini-quick-config #minibia-bot-talk-prompt {height:50px!important;}
+      #minibia-bot-panel .mb-gemini-quick-config #minibia-bot-talk-test-result,
+      #minibia-bot-panel .mb-gemini-quick-config #minibia-bot-talk-status {grid-column:1 / -1;}
+      #minibia-bot-panel .mb-gemini-quick-config .mb-field-grid {grid-template-columns:repeat(2,minmax(0,1fr));}
+      #minibia-bot-panel .mb-quick-gemini-test {grid-column:1 / -1;display:grid!important;
+        grid-template-columns:minmax(0,1fr) auto!important;gap:6px!important;align-items:end!important;
+        padding:6px!important;border:1px solid rgba(224,200,148,.20);border-radius:6px;}
+      #minibia-bot-panel .mb-quick-gemini-test > .mb-label,
+      #minibia-bot-panel .mb-quick-gemini-test > #minibia-bot-talk-test-result,
+      #minibia-bot-panel .mb-quick-gemini-test > .mb-small-note {grid-column:1 / -1;}
+      #minibia-bot-panel .mb-quick-gemini-test input {width:100%!important;min-width:0!important;}
+      #minibia-bot-panel .mb-quick-gemini-test button {min-width:100px!important;}
+      #minibia-bot-panel .mb-quick-tools label {min-width:0;}
+      #minibia-bot-panel .mb-quick-actions button {min-width:0!important;}
+      @container (max-width:1100px) {
+        #minibia-bot-panel .mb-advanced-columns {grid-template-columns:repeat(2,minmax(0,1fr))!important;}
+      }
+      @container (max-width:940px) {
+        #minibia-bot-panel .mb-quick-tools {column-count:1!important;}
+        #minibia-bot-panel .mb-quick-routes {grid-template-columns:1fr!important;}
+      }
+      @container (max-width:700px) {
+        #minibia-bot-panel .mb-advanced-columns {grid-template-columns:1fr!important;}
+        #minibia-bot-panel .mb-gemini-quick-config > .mb-stack {grid-template-columns:1fr!important;}
+        #minibia-bot-panel .mb-gemini-quick-config #minibia-bot-talk-ai-settings {grid-template-columns:1fr!important;}
+      }
+      #minibia-bot-panel .mb-body[hidden] {display:none!important;}
+    `;
     document.head.appendChild(style);
 
     const panel = document.createElement("div");
@@ -11326,7 +11394,9 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
         <label class="mb-toggle"><input id="minibia-bot-quick-attack" type="checkbox"/><span>Auto Attack</span></label>
         <label class="mb-toggle"><input id="minibia-bot-quick-melee" type="checkbox"/><span>Melee</span></label>
         <label class="mb-toggle"><input id="minibia-bot-quick-heal" type="checkbox"/><span>Auto Heal</span></label>
-        <label class="mb-toggle"><input id="minibia-bot-quick-talk" type="checkbox"/><span>Gemini</span></label>
+        <label class="mb-toggle"><input id="minibia-bot-quick-talk" type="checkbox"/><span>Gemini · Default / GM</span></label>
+        <label class="mb-toggle"><input id="minibia-bot-quick-private" type="checkbox"/><span>Responder privados</span></label>
+        <label class="mb-toggle"><input id="minibia-bot-quick-npc" type="checkbox"/><span>Responder NPC</span></label>
         <label class="mb-toggle"><input id="minibia-bot-quick-stairs" type="checkbox"/><span>Protect stairs</span></label>
         <label class="mb-toggle"><input id="minibia-bot-quick-seller-enabled" type="checkbox"/><span>HUNT + SELLER</span></label>
         <label class="mb-quick-hint">Sell when free cap ≤ <input id="minibia-bot-quick-seller-cap" type="number" min="1" max="10000" step="1" style="width:67px" /> oz</label>
@@ -11356,7 +11426,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
           </div>
         </details>
         <details class="mb-quick-group" id="minibia-bot-quick-group-alerts">
-          <summary>Alarmas y Monitoring <span class="mb-quick-group-sub">GM · CAPTCHA · jugadores · chat</span></summary>
+          <summary>ANTI DETECTION · Alarmas y Gemini <span class="mb-quick-group-sub">GM · CAPTCHA · Default · PM · API</span></summary>
           <div class="mb-quick-settings">
             <label class="mb-toggle"><input id="minibia-bot-quick-verification" type="checkbox"/><span>CAPTCHA alarm</span></label>
             <label class="mb-toggle"><input id="minibia-bot-quick-moderator" type="checkbox"/><span>GM alarm</span></label>
@@ -11374,15 +11444,6 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
             <button id="minibia-bot-quick-gm-add" type="button">ADD GM</button>
           </div>
           <div class="mb-small-note">Panic toggles can stop navigation. Sound-only alarms never do. Existing GM and Trusted lists remain in Advanced Monitoring.</div>
-        </details>
-        <details class="mb-quick-group" id="minibia-bot-quick-group-chat">
-          <summary>Gemini y respuestas <span class="mb-quick-group-sub">Default · privados · NPC</span></summary>
-          <div class="mb-quick-settings">
-            <label class="mb-toggle"><input id="minibia-bot-quick-private" type="checkbox"/><span>Reply PM</span></label>
-            <label class="mb-toggle"><input id="minibia-bot-quick-npc" type="checkbox"/><span>Reply NPC</span></label>
-          </div>
-          <div class="mb-quick-actions"><button id="minibia-bot-quick-test-gemini" type="button">TEST GEMINI (preview)</button></div>
-          <div class="mb-small-note">Full prompt, API key and test message stay in Gemini / Auto Chat below. The preview does not send a game message.</div>
         </details>
         <details class="mb-quick-group" id="minibia-bot-quick-group-floor">
           <summary>Objetos raros del piso <span class="mb-quick-group-sub">mover · Rare · scan</span></summary>
@@ -11535,6 +11596,47 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     placeMonitor(getSection(sideColumn, "Talk"), "Gemini / Auto Chat");
     placeMonitor(floorSection, "Rare Floor Item Movement");
     mainColumn.prepend(monitoring);
+    // Move the REAL Talk configuration (API key, prompt, test, delay) into Anti Detection.
+    // Reparent existing DOM nodes instead of cloning fields: IDs, listeners and persisted state remain unique.
+    const antiGroup=quickBar.querySelector('#minibia-bot-quick-group-alerts');
+    const originalTalk=monitoring.querySelector('#minibia-bot-talk-api-key')?.closest('.mb-column-section');
+    if(antiGroup && originalTalk){
+      const oldWrapper=originalTalk.closest('.mb-flat-section');
+      const title=document.createElement('div');
+      title.className='mb-gemini-compact-heading';
+      title.textContent='GEMINI · API, estilo y prueba';
+      antiGroup.append(title);
+      originalTalk.classList.add('mb-gemini-quick-config');
+      antiGroup.append(originalTalk);
+      if(oldWrapper && !oldWrapper.querySelector('.mb-column-section')) oldWrapper.remove();
+      const talkTitle=originalTalk.querySelector(':scope > .mb-label');
+      if(talkTitle) talkTitle.remove();
+      // Keep the REAL Gemini preview controls immediately after the API key and prompt.
+      const talkAi=originalTalk.querySelector('#minibia-bot-talk-ai-settings');
+      const testField=originalTalk.querySelector('#minibia-bot-talk-test-message')?.closest('label');
+      const testButton=originalTalk.querySelector('#minibia-bot-talk-test');
+      const testResult=originalTalk.querySelector('#minibia-bot-talk-test-result');
+      const testCaption=Array.from(originalTalk.querySelectorAll('.mb-label'))
+        .find(el=>el.textContent.trim()==='Test a reply (preview only)');
+      if(talkAi && testField && testButton && testResult){
+        const previewNote=testResult.nextElementSibling;
+        const testLine=document.createElement('div');
+        testLine.className='mb-quick-gemini-test';
+        if(testCaption)testLine.append(testCaption);
+        testLine.append(testField,testButton,testResult);
+        if(previewNote?.classList.contains('mb-small-note'))testLine.append(previewNote);
+        talkAi.after(testLine);
+      }
+    }
+    // The body has exactly two vertical regions: Quick Hub, then all legacy modules.
+    // Prevent overlapping CSS grid row placements when the panel is maximized.
+    const advancedColumns=document.createElement('div');
+    advancedColumns.className='mb-advanced-columns';
+    const bodyElement=panel.querySelector('.mb-body');
+    if(bodyElement){
+      bodyElement.append(advancedColumns);
+      advancedColumns.append(mainColumn,sideColumn,caveColumn);
+    }
     const mainUtilities = Array.from(mainColumn.children).find((child) =>
       child.classList.contains("mb-column-section") && !!child.querySelector("#minibia-bot-rune-enabled"));
     const loadedText = Array.from(mainColumn.children).find((child) =>
