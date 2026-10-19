@@ -4505,6 +4505,7 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     pausedForModeratorUntil: 0,
     moderatorLastSender: null,
     moderatorSeen: new Set(),
+    moderatorPresenceSeen: new Set(),
     moderatorScannerTimerId: null,
   };
   const minimapOverlayState = {
@@ -6376,12 +6377,17 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
   // Special-status chat sender detector. No color-only guessing: colors are
   // themes and messages may quote role tags. Use the sender field/prefix only.
   const moderatorRolePattern = /\[(?:GOD|GM|CM|ADMIN|MODERATOR|MOD)\]/i;
+  // Exact-name evidence from the observed Minibia server; a purple chat
+  // colour or sudden appearance alone is not proof of moderator status.
+  const knownModeratorSenders = new Set(['god minibia']);
   function isModeratorSender(sender, role = "") {
     const text = String(sender || "").trim();
     const declaredRole = String(role || "").trim();
     if (moderatorRolePattern.test(text) || moderatorRolePattern.test(`[${declaredRole}]`)) return true;
+    const normalized = text.toLowerCase().replace(/\s+/g, ' ');
+    if (knownModeratorSenders.has(normalized)) return true;
     const gmNames = bot.panic?.config?.gameMasterNames || [];
-    return !!text && gmNames.some((name) => String(name || "").trim().toLowerCase() === text.toLowerCase());
+    return !!text && gmNames.some((name) => String(name || "").trim().toLowerCase() === normalized);
   }
 
   function isModeratorChatMessage(message) {
@@ -6416,34 +6422,62 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     state.moderatorSeen = new Set(moderatorChatSnapshot().map((msg) => msg.key));
   }
 
+  function pauseForModerator(sender, source = 'chat') {
+    if (!(state.running || bot.attack?.status?.()?.running)) return false;
+    const now=Date.now();
+    const alreadyPaused=now < state.pausedForModeratorUntil;
+    state.pausedForModeratorUntil=now+config.moderatorPauseMs;
+    state.moderatorLastSender=sender;
+    if (!alreadyPaused) {
+      cancelOwnWaypointWalk();
+      bot.attack?.setMovementHold?.('moderator', true);
+      bot.safeNavigation?.cancel?.('attack');
+      bot.reportAlarm?.('gm-'+source, `Posible moderador: ${sender}`,
+        `Movimiento en pausa ${Math.ceil(config.moderatorPauseMs/1000)} s; ataque estacionario`,
+        {source: source==='presence'?'Entidad reconocida cerca':'Mensaje de chat',
+          channel:source==='presence'?'mundo':'chat',sender});
+      bot.log('cave paused after moderator signal', {sender,source,seconds:config.moderatorPauseMs/1000});
+    }
+    return true;
+  }
+
+  function scanModeratorPresence() {
+    const me=normalizePosition(bot.getPlayerPosition?.());
+    if (!me) return;
+    const playerType=window.CONST?.TYPES?.PLAYER ?? 0;
+    const npcType=window.CONST?.TYPES?.NPC ?? 2;
+    const current=new Set();
+    for (const creature of Object.values(window.gameClient?.world?.activeCreatures || {})) {
+      if (!creature || (creature.type!==playerType && creature.type!==npcType)) continue;
+      const position=normalizePosition(creature.getPosition?.() || creature.__position);
+      if (!position || position.z!==me.z ||
+          Math.max(Math.abs(position.x-me.x),Math.abs(position.y-me.y))>8) continue;
+      const name=String(creature.name||'').trim();
+      if (!isModeratorSender(name, creature.role||creature.rank||'')) continue;
+      const key=`${creature.id ?? creature.__id ?? name}|${name.toLowerCase()}`;
+      current.add(key);
+      if (!state.moderatorPresenceSeen.has(key)) pauseForModerator(name,'presence');
+    }
+    // Re-arm only after the entity has left the observable area.
+    state.moderatorPresenceSeen=current;
+  }
+
   function scanModeratorChat() {
     if (!config.pauseOnModeratorMessage) return;
     try {
-      const messages = moderatorChatSnapshot();
+      scanModeratorPresence();
+      const messages=moderatorChatSnapshot();
       for (const msg of messages) {
         if (state.moderatorSeen.has(msg.key)) continue;
         state.moderatorSeen.add(msg.key);
-        if (state.moderatorSeen.size > 400) {
-          state.moderatorSeen = new Set(Array.from(state.moderatorSeen).slice(-250));
-        }
-        if (!(state.running || bot.attack?.status?.()?.running) ||
-            !isModeratorSender(msg.sender, msg.role)) continue;
-        const now = Date.now();
-        const alreadyPaused = now < state.pausedForModeratorUntil;
-        state.pausedForModeratorUntil = now + config.moderatorPauseMs;
-        state.moderatorLastSender = msg.sender;
-        if (!alreadyPaused) {
-          cancelOwnWaypointWalk();
-          bot.attack?.setMovementHold?.('moderator', true);
-          bot.safeNavigation?.cancel?.('attack');
-          bot.reportAlarm?.('gm-chat', `Mensaje de moderador: ${msg.sender}`, `Movimiento en pausa ${Math.ceil(config.moderatorPauseMs/1000)} s; ataque estacionario`);
-          bot.log('cave paused after moderator chat', { sender: msg.sender, seconds: config.moderatorPauseMs/1000 });
-        }
+        if (state.moderatorSeen.size>400)
+          state.moderatorSeen=new Set(Array.from(state.moderatorSeen).slice(-250));
+        if (!isModeratorSender(msg.sender,msg.role)) continue;
+        pauseForModerator(msg.sender,'chat');
       }
-      // Also expire movement hold if Cave Bot was not running when GM spoke.
       if (!state.running && state.pausedForModeratorUntil) processModeratorPause(Date.now());
-    } catch (error) {
-      bot.log('moderator chat scan failed', error?.message || error);
+    } catch(error) {
+      bot.log('moderator scan failed',error?.message||error);
     }
   }
 
@@ -6451,6 +6485,7 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     if (state.moderatorScannerTimerId != null) window.clearInterval(state.moderatorScannerTimerId);
     state.moderatorScannerTimerId = null;
     resetModeratorScanBaseline(); // Do not trigger on old chat history.
+    state.moderatorPresenceSeen=new Set();
     if (config.pauseOnModeratorMessage) {
       state.moderatorScannerTimerId = window.setInterval(scanModeratorChat, 500);
     }
@@ -6649,6 +6684,11 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     if (!state.running || state.sellerTrip) return false;
     if (!force && !config.autoSellerVisit) return false;
     if (!force && Date.now() < state.sellerTripCooldownUntil) return false;
+    if (!force) {
+      const sale=bot.autoSell?.config;
+      if (!sale?.enabled || !sale.autoReturnAfterSale ||
+          !String(sale.npcName||'').trim() || !String(sale.allowedItems||'').trim()) return false;
+    }
     const seller = getValidatedSellerRoute(force);
     if (!seller) return false;
     const freeCapacity = Number(bot.getPlayerSnapshot?.()?.capacity);
@@ -6727,14 +6767,20 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
       const ok = start();
       return {ok, mode:ok?'hunt':null, reason:ok?'':'Cave Bot could not start'};
     }
-    const seller = getValidatedSellerRoute(true);
-    if (!seller) {
-      return {ok:false, reason:'Seller route is invalid. Select the saved Shanar route.'};
-    }
+    const seller = getValidatedSellerRoute(false);
     const sales=bot.autoSell?.config;
-    if (!sales?.enabled || !String(sales.allowedItems||'').trim() ||
-        sales.autoReturnAfterSale!==true || !String(sales.npcName||'').trim()) {
-      return {ok:false, reason:'HUNT + SELLER requires Auto Sell ON, NPC name, allowed items and Return to hunt ON.'};
+    const merchantReady=!!seller && !!sales?.enabled &&
+      !!String(sales.allowedItems||'').trim() && sales.autoReturnAfterSale===true &&
+      !!String(sales.npcName||'').trim();
+    // An incomplete OPTIONAL seller configuration must not suppress hunting.
+    // Never start an automated trip until both route and sale safeguards pass.
+    if (!merchantReady) {
+      const reason=!seller ? 'Shanar route is invalid' :
+        'Auto Sell must be ON with NPC name, allowed items and Return to hunt ON';
+      const ok=start();
+      bot.log('START HUNT: hunting only; automated selling pending configuration', {reason});
+      return {ok, mode:ok?'hunt-seller-pending':null,
+        reason:ok?`Caza activa; venta pendiente: ${reason}`:'Cave Bot could not start'};
     }
     const position = normalizePosition(bot.getPlayerPosition());
     if (!position) return {ok:false, reason:'Player position is unavailable'};
@@ -6759,7 +6805,14 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     const sellerCandidates=seller.sellerRoute.map((wp,i)=>({index:i,distance:reachable(wp)}))
       .filter((x)=>Number.isFinite(x.distance))
       .sort((a,b)=>a.distance-b.distance || b.index-a.index);
-    const nearbyHunt=huntCandidates[0]||null;
+    // START HUNT must work at an actual hunt spawn even when its nearest
+    // waypoint is beyond the six-tile merchant-connection tolerance. Validate
+    // a same-floor path before deciding whether to enter the seller corridor.
+    const additionalHuntCandidates=route.map((wp,i)=>({index:i,
+      distance:reachable(wp,24)}))
+      .filter(x=>x.index>=Math.min(entryWaypointCount,route.length-1) && Number.isFinite(x.distance))
+      .sort((a,b)=>a.distance-b.distance || a.index-b.index);
+    const nearbyHunt=huntCandidates[0]||additionalHuntCandidates[0]||null;
     const nearbySeller=sellerCandidates[0]||null;
     const merchantEnd=seller.sellerRoute[seller.sellerRoute.length-1];
     const nearSellerEnd=reachable(merchantEnd,3)<=3;
@@ -7512,7 +7565,10 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
           sellerPresetName:sr.sellerPresetName } : {valid:false};
       })(),
       homeRouteValid: !!(config.homePresetName && getValidatedHomeRoute(false)),
-      freeCapacity: Number(bot.getPlayerSnapshot?.()?.capacity) || null,
+      freeCapacity: (() => {
+        const cap = bot.getPlayerSnapshot?.()?.capacity;
+        return cap == null ? null : (Number.isFinite(Number(cap)) ? Number(cap) : null);
+      })(),
     };
   }
 
@@ -8176,7 +8232,28 @@ window.__minibiaBotBundle.installTalkModule = function installTalkModule(bot) {
     lastGeminiFailureAt: 0,
     lastGeminiError: "",
     lastGeminiAlarmAt: 0,
+    trace: (() => {
+      try {
+        const raw = JSON.parse(window.sessionStorage?.getItem('minibiaBot.talk.trace.v1') || '[]');
+        return Array.isArray(raw) ? raw.slice(-80) : [];
+      } catch (_) { return []; }
+    })(),
+    lastCooldownTraceAt: 0,
   };
+  // Private message contents and API credentials are never retained in this log.
+  function traceTalk(type, details = {}) {
+    const item = {at:Date.now(), type:String(type).slice(0,40),
+      sender:String(details.sender || '').slice(0,50),
+      channel:String(details.channel || '').slice(0,30),
+      reason:String(details.reason || '').slice(0,180),
+      stage:String(details.stage || '').slice(0,40),
+      reply:details.privateMessage ? '[respuesta privada]' : String(details.reply || '').slice(0,100)};
+    state.trace.push(item);
+    if (state.trace.length > 80) state.trace.splice(0, state.trace.length - 80);
+    try { window.sessionStorage?.setItem('minibiaBot.talk.trace.v1', JSON.stringify(state.trace)); }
+    catch (_) {}
+    return item;
+  }
   const greetingReplies = ["yo", "sup", "hey", "hiya", "yo lol"];
   const agreeReplies = ["true", "fr", "based", "ya", "real"];
   const vagueQuestionReplies = ["maybe", "not sure", "hard to say", "could be"];
@@ -8825,6 +8902,7 @@ window.__minibiaBotBundle.installTalkModule = function installTalkModule(bot) {
       ? raw : (stage === "delivery" ? "Could not deliver Gemini reply" : "Gemini network/request error");
     state.lastGeminiFailureAt = Date.now();
     state.lastGeminiError = reason;
+    traceTalk('ERROR-GEMINI', {reason,stage});
     bot.log("talk Gemini automatic reply failed", { reason, stage });
     // One alarm per 30s during an outage; no changes to attack, heal or navigation.
     if (config.alarmOnGeminiFailure && state.lastGeminiFailureAt - state.lastGeminiAlarmAt >= 30000) {
@@ -8836,16 +8914,34 @@ window.__minibiaBotBundle.installTalkModule = function installTalkModule(bot) {
   async function maybeRespond() {
     if (!state.running || state.pending || !config.enabled ||
         (config.replyMode === "gemini" && !config.apiKey)) return false;
-    if (Date.now() - state.lastReplyAt < config.replyCooldownMs) return false;
+    if (Date.now() - state.lastReplyAt < config.replyCooldownMs) {
+      if (Date.now() - state.lastCooldownTraceAt > 20000) {
+        const unseen = getEligibleMessages().filter(m=>m?.key && !hasSeenMessage(m) && !isSelfMessage(m));
+        if (unseen.length) {
+          const m=unseen[unseen.length-1];
+          traceTalk('esperando', {sender:m.sender,channel:m.privateMessage?'PM':m.channelName,
+            reason:'Cooldown de respuestas aún activo'});
+          state.lastCooldownTraceAt = Date.now();
+        }
+      }
+      return false;
+    }
 
     const pending = getNewestPendingMessage();
     if (!pending?.targetMessage) return false;
     const target = pending.targetMessage;
+    const destinationChannel = target.privateMessage ? 'PM' : (target.channelName || 'Default');
+    traceTalk('mensaje-recibido', {sender:target.sender,channel:destinationChannel,
+      reason:'Elegible para respuesta',privateMessage:target.privateMessage});
     const npcMessage = !target.privateMessage && isNpcMessage(target);
     const visible = target.privateMessage ? config.replyToPrivate : npcMessage
       ? config.replyToNpcs && isSenderVisibleNpc(target)
       : isSenderVisiblePlayer(target);
     if (!visible) {
+      traceTalk('omitido', {sender:target.sender,channel:destinationChannel,
+        reason:target.privateMessage?'Respuestas privadas desactivadas':
+          npcMessage?'NPC no visible / respuesta a NPC desactivada':'Remitente no identificado como jugador cercano',
+        privateMessage:target.privateMessage});
       rememberSeenMessages(pending.pendingMessages);
       return false;
     }
@@ -8856,6 +8952,8 @@ window.__minibiaBotBundle.installTalkModule = function installTalkModule(bot) {
     state.queuedReply = { sender: target.sender, mode: config.replyMode,
       channel: target.privateMessage ? "Private" : "Default" };
     try {
+      traceTalk('procesando', {sender:target.sender,channel:destinationChannel,
+        reason:config.replyMode==='gemini'?'Consulta a Gemini':'Reglas locales',privateMessage:target.privateMessage});
       let reply = "";
       let messageType = config.replyMode;
       let language = "en";
@@ -8884,17 +8982,32 @@ window.__minibiaBotBundle.installTalkModule = function installTalkModule(bot) {
       }
       reply = sanitizeReply(reply);
       rememberSeenMessages(pending.pendingMessages);
-      if (!reply || !state.running || generation !== state.generation) return false;
+      if (!reply || !state.running || generation !== state.generation) {
+        traceTalk('no-enviado', {sender:target.sender,channel:destinationChannel,
+          reason:!reply?'Respuesta vacía': 'Talk desactivado o configuración modificada durante generación',
+          privateMessage:target.privateMessage});
+        return false;
+      }
+      traceTalk('respuesta-lista', {sender:target.sender,channel:destinationChannel,
+        reason:'Esperando intervalo de respuesta',reply,privateMessage:target.privateMessage});
       await wait(getReplyDelay());
       if (!state.running || generation !== state.generation ||
           (target.privateMessage && !config.replyToPrivate) ||
           (!target.privateMessage && !npcMessage && !isSenderVisiblePlayer(target)) ||
           (npcMessage && !isSenderVisibleNpc(target)) ||
-          Date.now() - state.lastReplyAt < config.replyCooldownMs) return false;
+          Date.now() - state.lastReplyAt < config.replyCooldownMs) {
+        traceTalk('no-enviado', {sender:target.sender,channel:destinationChannel,
+          reason:'Remitente fuera de alcance, cooldown o Talk desactivado antes de enviar',
+          privateMessage:target.privateMessage});
+        return false;
+      }
 
       const sent = sendToCorrectChannel(target, reply);
       if (sent) {
         state.lastReplyAt = Date.now();
+        traceTalk('ENVIADO', {sender:target.sender,channel:destinationChannel,
+          reason:config.replyMode==='gemini'?'Respuesta Gemini enviada al canal':'Regla enviada al canal',
+          reply,privateMessage:target.privateMessage});
         bot.log("talk replied", { npc: npcMessage, private: target.privateMessage,
           sender: target.sender, message: target.body, messageType, language,
           mode: config.replyMode, reply });
@@ -8955,6 +9068,7 @@ window.__minibiaBotBundle.installTalkModule = function installTalkModule(bot) {
     state.running = true;
     state.generation += 1;
     seedSeenMessages();
+    traceTalk('INICIO', {reason:'Talk activado; el historial anterior se considera leído'});
     bot.log("talk module started", {
       model: config.replyMode === "gemini" ? config.model : "rules (offline)",
       channel: config.replyToPrivate ? "Default + Private" : "Default",
@@ -8969,6 +9083,7 @@ window.__minibiaBotBundle.installTalkModule = function installTalkModule(bot) {
     const shouldPersistEnabled = options.persistEnabled !== false;
     state.running = false;
     state.generation += 1;
+    traceTalk('DETENIDO', {reason:'Talk apagado o reiniciado'});
 
     if (shouldPersistEnabled) {
       config.enabled = false;
@@ -9010,6 +9125,8 @@ window.__minibiaBotBundle.installTalkModule = function installTalkModule(bot) {
       lastReplyAt: state.lastReplyAt,
       lastGeminiFailureAt: state.lastGeminiFailureAt,
       lastGeminiError: state.lastGeminiError,
+      lastEvent: state.trace[state.trace.length - 1] || null,
+      recentSent: state.trace.filter(e=>e.type==='ENVIADO').slice(-5),
       config: {
         ...config,
         apiKey: config.apiKey ? "***configured***" : "",
@@ -9044,6 +9161,7 @@ window.__minibiaBotBundle.installTalkModule = function installTalkModule(bot) {
     getChatMessages,
     isSpellIncantation,
     previewReply,
+    history(limit = 30) { return state.trace.slice(-Math.min(80,Math.max(1,Math.floor(Number(limit)||30)))).map(e=>({...e})); },
     config,
   };
 };
@@ -11073,6 +11191,19 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
       #minibia-bot-panel .mb-quick-status,#minibia-bot-panel #minibia-bot-quick-status {
         font-size:11px;margin:0;
       }
+      #minibia-bot-panel .mb-essential-ml {
+        display:flex;align-items:center;gap:7px;flex-wrap:wrap;
+        padding:5px 0;border-top:1px solid rgba(224,200,148,.17);
+      }
+      #minibia-bot-panel .mb-essential-ml > strong {font-size:11px;color:#d9bc86;white-space:nowrap;}
+      #minibia-bot-panel .mb-essential-ml .mb-quick-training {
+        display:flex!important;flex-wrap:wrap!important;align-items:center!important;
+        gap:5px!important;margin:0!important;
+      }
+      #minibia-bot-panel .mb-essential-ml .mb-field {display:inline-flex;align-items:center;gap:4px;font-size:11px;flex:0 0 auto!important;min-width:0;}
+      #minibia-bot-panel .mb-essential-ml .mb-field-label {font-size:11px;}
+      #minibia-bot-panel .mb-essential-ml input[type=text] {width:110px;max-width:110px;height:23px;font-size:11px;}
+      #minibia-bot-panel .mb-essential-ml input[type=number] {width:52px;max-width:52px;height:23px;font-size:11px;}
       /* Every control remains visible on the SAME panel: no hidden Advanced state. */
       @container (max-width:850px) {
         #minibia-bot-panel .mb-quick-group .mb-quick-category {flex-basis:105px;}
@@ -11858,6 +11989,8 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
       </div>
       <div class="mb-small-note" id="minibia-bot-quick-route-check" style="margin:4px 0;line-height:1.35">Rutas: comprobando…</div>
       <div class="mb-small-note" id="minibia-bot-quick-alarm-reason" style="margin:4px 0;line-height:1.35">Última alarma: ninguna desde la carga del bot</div>
+      <div class="mb-small-note" id="minibia-bot-quick-talk-trace" style="margin:4px 0;line-height:1.35">Gemini: sin eventos registrados</div>
+      <div class="mb-small-note" id="minibia-bot-quick-seller-trace" style="margin:4px 0;line-height:1.35">HUNT + SELLER: comprobando…</div>
       <div class="mb-small-note" id="minibia-bot-quick-hold-reason" style="margin:4px 0;line-height:1.35">Movimiento: comprobando…</div>
       <div class="mb-quick-summary" id="minibia-bot-quick-summary">Reading current module states…</div>
       <div class="mb-quick-tools">
@@ -12113,6 +12246,19 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
           .replace('HP hotkey (1–12)','HP key')
           .replace('Mana hotkey (1–12)','Mana key');
       }
+    }
+    // Reparent the REAL ML Trainer controls into Essentials. Listeners attach
+    // by ID after this DOM move; the supplies section retains its other tools.
+    const mlRow=quickBar.querySelector('#minibia-bot-quick-group-training .mb-quick-training');
+    if (mlRow && essentialsCore) {
+      const mlEssentials=document.createElement('div');
+      mlEssentials.className='mb-essential-ml';
+      const mlTitle=document.createElement('strong');
+      mlTitle.textContent='ML Trainer';
+      mlEssentials.append(mlTitle, mlRow);
+      (healFields || essentialsCore).after(mlEssentials);
+      const remainingTraining=quickBar.querySelector('#minibia-bot-quick-group-training > summary');
+      if (remainingTraining) remainingTraining.firstChild.textContent='Supplies ';
     }
     // Group advanced Talk API/settings into the real Anti Detection group (already
     // reparented above). Keep its ONE set of inputs and events.
@@ -12555,6 +12701,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
         `Rare mover ${floorStatusNow.running?'ON':'OFF'} · Stairs ${attackConfig.avoidFloorChangesOnChase!==false?'PROTECTED':'UNPROTECTED'} · `+
         `${c?.sellerRouteInfo?.valid?'Seller route ready':'Seller route not ready'}`;
     }
+    let lastHuntStartInfo = null;
     function refreshSafetySummary() {
       const c=bot.cave?.status?.()||{};
       const em=bot.emergencyState?.()||{};
@@ -12563,6 +12710,8 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
       const routeLabel=quickBar.querySelector('#minibia-bot-quick-route-check');
       const alertLabel=quickBar.querySelector('#minibia-bot-quick-alarm-reason');
       const holdLabel=quickBar.querySelector('#minibia-bot-quick-hold-reason');
+      const talkLabel=quickBar.querySelector('#minibia-bot-quick-talk-trace');
+      const sellerLabel=quickBar.querySelector('#minibia-bot-quick-seller-trace');
       const huntRoute=c.route||[];
       const routeName=c.activePresetName || quickRoute?.value || '(ninguna)';
       const warnings=[];
@@ -12582,6 +12731,25 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
         ? `Última alarma ${new Date(alert.at).toLocaleTimeString()}: ${alert.message} · ${alert.effect}`+
           (alert.source ? ` · Origen: ${alert.source} · Canal: ${alert.channel||'?'} · Remitente: ${alert.sender||'?'} · Texto: ${alert.systemText||'(sin texto)'}` : '')
         : 'Última alarma: ninguna registrada en esta pestaña';
+      if (talkLabel) {
+        const talk=bot.talk?.status?.()||{};
+        const event=talk.lastEvent;
+        talkLabel.textContent=event
+          ? `Gemini: ${event.type} · ${event.sender || 'sistema'} · ${event.channel || '-'} · ${event.reason || event.stage || ''} · ${new Date(event.at).toLocaleTimeString()}`
+          : `Gemini: ${talk.running?'activo':'apagado'} · sin eventos registrados (F12: minibiaBot.talk.history())`;
+      }
+      if (sellerLabel) {
+        const phase=c.sellerTrip?.phase;
+        const seller=bot.autoSell?.status?.()||{};
+        const warnings=[];
+        if(c.config?.autoSellerVisit && !c.sellerRouteInfo?.valid) warnings.push('ruta Shanar inválida');
+        if(c.config?.autoSellerVisit && !seller.config?.enabled) warnings.push('Auto Sell OFF');
+        if(c.config?.autoSellerVisit && !seller.config?.autoReturnAfterSale) warnings.push('Return to hunt OFF');
+        sellerLabel.textContent=`HUNT + SELLER: ${!c.config?.autoSellerVisit?'OFF':phase || (c.running?'cazando / esperando límite de capacidad':'pendiente de START HUNT')}` +
+          ` · cap ${Number.isFinite(c.freeCapacity)?c.freeCapacity:'?'} / límite ${c.config?.minimumFreeCapacity||'?'} oz`+
+          (warnings.length?' · REVISAR: '+warnings.join(', '):'') +
+          (lastHuntStartInfo?` · Último START HUNT: ${lastHuntStartInfo}`:'');
+      }
       if (!holdLabel) return;
       const reasons=[];
       if (em.halted) reasons.push('EMERGENCY STOP: usar botón de recuperación');
@@ -12867,23 +13035,29 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
       try { result=bot.cave?.startHuntCycle?.(); }
       catch(e) {
         console.error('[minibia-bot] START HUNT failed',e);
+        lastHuntStartInfo='ERROR '+(e?.message||String(e));
         quickStatus.textContent='START HUNT ERROR: '+(e?.message||String(e));
+        refreshSafetySummary();
         return;
       }
       const ok=typeof result==='boolean' ? result : !!result?.ok;
       const mode=result?.mode||'hunt';
       const reason=result?.reason||'';
+      lastHuntStartInfo=ok?(reason|| (mode==='go-to-hunt'?'Yendo a hunt':mode==='sell-first'?'Venta antes de cazar':'Iniciado')):
+        ('NO INICIÓ: '+(reason||'Motivo no informado'));
       quickStartWarning=''; quickStartWarningAt=0;
       const caveNow=bot.cave?.status?.()||{};
       const modeLabel={
         'go-to-hunt':'VIAJANDO A LA HUNT',
         'sell-first':'VENDIENDO ANTES DE CAZAR',
         'hunt':'HUNT INICIADA',
-        'hunt-already-running':'HUNT YA ACTIVA'
+        'hunt-already-running':'HUNT YA ACTIVA',
+        'hunt-seller-pending':'HUNT INICIADA · SELLER PENDIENTE'
       }[mode]||'HUNT INICIADA';
-      quickStatus.textContent=ok ? `${modeLabel}: ${name}` :
+      quickStatus.textContent=ok ? `${modeLabel}: ${name}${reason?' · '+reason:''}` :
         ('NO INICIÓ: '+(reason||caveNow.lastRoutePathError||'revisá los waypoints y la ruta a Shanar'));
       refreshQuickSummary();
+      refreshSafetySummary();
       refreshEntryCount();
     });
     quickStop.addEventListener('click',()=>{

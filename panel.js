@@ -1168,6 +1168,19 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
       #minibia-bot-panel .mb-quick-status,#minibia-bot-panel #minibia-bot-quick-status {
         font-size:11px;margin:0;
       }
+      #minibia-bot-panel .mb-essential-ml {
+        display:flex;align-items:center;gap:7px;flex-wrap:wrap;
+        padding:5px 0;border-top:1px solid rgba(224,200,148,.17);
+      }
+      #minibia-bot-panel .mb-essential-ml > strong {font-size:11px;color:#d9bc86;white-space:nowrap;}
+      #minibia-bot-panel .mb-essential-ml .mb-quick-training {
+        display:flex!important;flex-wrap:wrap!important;align-items:center!important;
+        gap:5px!important;margin:0!important;
+      }
+      #minibia-bot-panel .mb-essential-ml .mb-field {display:inline-flex;align-items:center;gap:4px;font-size:11px;flex:0 0 auto!important;min-width:0;}
+      #minibia-bot-panel .mb-essential-ml .mb-field-label {font-size:11px;}
+      #minibia-bot-panel .mb-essential-ml input[type=text] {width:110px;max-width:110px;height:23px;font-size:11px;}
+      #minibia-bot-panel .mb-essential-ml input[type=number] {width:52px;max-width:52px;height:23px;font-size:11px;}
       /* Every control remains visible on the SAME panel: no hidden Advanced state. */
       @container (max-width:850px) {
         #minibia-bot-panel .mb-quick-group .mb-quick-category {flex-basis:105px;}
@@ -1953,6 +1966,8 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
       </div>
       <div class="mb-small-note" id="minibia-bot-quick-route-check" style="margin:4px 0;line-height:1.35">Rutas: comprobando…</div>
       <div class="mb-small-note" id="minibia-bot-quick-alarm-reason" style="margin:4px 0;line-height:1.35">Última alarma: ninguna desde la carga del bot</div>
+      <div class="mb-small-note" id="minibia-bot-quick-talk-trace" style="margin:4px 0;line-height:1.35">Gemini: sin eventos registrados</div>
+      <div class="mb-small-note" id="minibia-bot-quick-seller-trace" style="margin:4px 0;line-height:1.35">HUNT + SELLER: comprobando…</div>
       <div class="mb-small-note" id="minibia-bot-quick-hold-reason" style="margin:4px 0;line-height:1.35">Movimiento: comprobando…</div>
       <div class="mb-quick-summary" id="minibia-bot-quick-summary">Reading current module states…</div>
       <div class="mb-quick-tools">
@@ -2208,6 +2223,19 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
           .replace('HP hotkey (1–12)','HP key')
           .replace('Mana hotkey (1–12)','Mana key');
       }
+    }
+    // Reparent the REAL ML Trainer controls into Essentials. Listeners attach
+    // by ID after this DOM move; the supplies section retains its other tools.
+    const mlRow=quickBar.querySelector('#minibia-bot-quick-group-training .mb-quick-training');
+    if (mlRow && essentialsCore) {
+      const mlEssentials=document.createElement('div');
+      mlEssentials.className='mb-essential-ml';
+      const mlTitle=document.createElement('strong');
+      mlTitle.textContent='ML Trainer';
+      mlEssentials.append(mlTitle, mlRow);
+      (healFields || essentialsCore).after(mlEssentials);
+      const remainingTraining=quickBar.querySelector('#minibia-bot-quick-group-training > summary');
+      if (remainingTraining) remainingTraining.firstChild.textContent='Supplies ';
     }
     // Group advanced Talk API/settings into the real Anti Detection group (already
     // reparented above). Keep its ONE set of inputs and events.
@@ -2650,6 +2678,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
         `Rare mover ${floorStatusNow.running?'ON':'OFF'} · Stairs ${attackConfig.avoidFloorChangesOnChase!==false?'PROTECTED':'UNPROTECTED'} · `+
         `${c?.sellerRouteInfo?.valid?'Seller route ready':'Seller route not ready'}`;
     }
+    let lastHuntStartInfo = null;
     function refreshSafetySummary() {
       const c=bot.cave?.status?.()||{};
       const em=bot.emergencyState?.()||{};
@@ -2658,6 +2687,8 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
       const routeLabel=quickBar.querySelector('#minibia-bot-quick-route-check');
       const alertLabel=quickBar.querySelector('#minibia-bot-quick-alarm-reason');
       const holdLabel=quickBar.querySelector('#minibia-bot-quick-hold-reason');
+      const talkLabel=quickBar.querySelector('#minibia-bot-quick-talk-trace');
+      const sellerLabel=quickBar.querySelector('#minibia-bot-quick-seller-trace');
       const huntRoute=c.route||[];
       const routeName=c.activePresetName || quickRoute?.value || '(ninguna)';
       const warnings=[];
@@ -2677,6 +2708,25 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
         ? `Última alarma ${new Date(alert.at).toLocaleTimeString()}: ${alert.message} · ${alert.effect}`+
           (alert.source ? ` · Origen: ${alert.source} · Canal: ${alert.channel||'?'} · Remitente: ${alert.sender||'?'} · Texto: ${alert.systemText||'(sin texto)'}` : '')
         : 'Última alarma: ninguna registrada en esta pestaña';
+      if (talkLabel) {
+        const talk=bot.talk?.status?.()||{};
+        const event=talk.lastEvent;
+        talkLabel.textContent=event
+          ? `Gemini: ${event.type} · ${event.sender || 'sistema'} · ${event.channel || '-'} · ${event.reason || event.stage || ''} · ${new Date(event.at).toLocaleTimeString()}`
+          : `Gemini: ${talk.running?'activo':'apagado'} · sin eventos registrados (F12: minibiaBot.talk.history())`;
+      }
+      if (sellerLabel) {
+        const phase=c.sellerTrip?.phase;
+        const seller=bot.autoSell?.status?.()||{};
+        const warnings=[];
+        if(c.config?.autoSellerVisit && !c.sellerRouteInfo?.valid) warnings.push('ruta Shanar inválida');
+        if(c.config?.autoSellerVisit && !seller.config?.enabled) warnings.push('Auto Sell OFF');
+        if(c.config?.autoSellerVisit && !seller.config?.autoReturnAfterSale) warnings.push('Return to hunt OFF');
+        sellerLabel.textContent=`HUNT + SELLER: ${!c.config?.autoSellerVisit?'OFF':phase || (c.running?'cazando / esperando límite de capacidad':'pendiente de START HUNT')}` +
+          ` · cap ${Number.isFinite(c.freeCapacity)?c.freeCapacity:'?'} / límite ${c.config?.minimumFreeCapacity||'?'} oz`+
+          (warnings.length?' · REVISAR: '+warnings.join(', '):'') +
+          (lastHuntStartInfo?` · Último START HUNT: ${lastHuntStartInfo}`:'');
+      }
       if (!holdLabel) return;
       const reasons=[];
       if (em.halted) reasons.push('EMERGENCY STOP: usar botón de recuperación');
@@ -2962,23 +3012,29 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
       try { result=bot.cave?.startHuntCycle?.(); }
       catch(e) {
         console.error('[minibia-bot] START HUNT failed',e);
+        lastHuntStartInfo='ERROR '+(e?.message||String(e));
         quickStatus.textContent='START HUNT ERROR: '+(e?.message||String(e));
+        refreshSafetySummary();
         return;
       }
       const ok=typeof result==='boolean' ? result : !!result?.ok;
       const mode=result?.mode||'hunt';
       const reason=result?.reason||'';
+      lastHuntStartInfo=ok?(reason|| (mode==='go-to-hunt'?'Yendo a hunt':mode==='sell-first'?'Venta antes de cazar':'Iniciado')):
+        ('NO INICIÓ: '+(reason||'Motivo no informado'));
       quickStartWarning=''; quickStartWarningAt=0;
       const caveNow=bot.cave?.status?.()||{};
       const modeLabel={
         'go-to-hunt':'VIAJANDO A LA HUNT',
         'sell-first':'VENDIENDO ANTES DE CAZAR',
         'hunt':'HUNT INICIADA',
-        'hunt-already-running':'HUNT YA ACTIVA'
+        'hunt-already-running':'HUNT YA ACTIVA',
+        'hunt-seller-pending':'HUNT INICIADA · SELLER PENDIENTE'
       }[mode]||'HUNT INICIADA';
-      quickStatus.textContent=ok ? `${modeLabel}: ${name}` :
+      quickStatus.textContent=ok ? `${modeLabel}: ${name}${reason?' · '+reason:''}` :
         ('NO INICIÓ: '+(reason||caveNow.lastRoutePathError||'revisá los waypoints y la ruta a Shanar'));
       refreshQuickSummary();
+      refreshSafetySummary();
       refreshEntryCount();
     });
     quickStop.addEventListener('click',()=>{

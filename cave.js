@@ -45,7 +45,13 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     pausedForVerification: false,
     verificationTimerId: null,
     lastVerificationNotice: null,
+    lastVerificationSource: null,
+    lastVerificationChannel: null,
+    lastVerificationSender: null,
     lastVerificationSeenAt: 0,
+    verificationPendingNotices: [],
+    verificationBoundConsole: null,
+    verificationDomSeen: new WeakMap(),
     ignoredVerificationNotice: null,
     verificationSnapshot: null,
     verificationSeenEntries: new WeakSet(),
@@ -70,6 +76,7 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     pausedForModeratorUntil: 0,
     moderatorLastSender: null,
     moderatorSeen: new Set(),
+    moderatorPresenceSeen: new Set(),
     moderatorScannerTimerId: null,
   };
   const minimapOverlayState = {
@@ -1821,126 +1828,137 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
   }
 
   function verificationPhase(text) {
-    // Countdown warnings can have either "captcha in 30 seconds" or
-    // "30 seconds until captcha" wording, in Spanish or English.
     const match = String(text).match(/\b(60|30|15)\s*(?:seconds?|secs?|segundos?|segs?|s)\b/i);
-    if (match) return match[1];
-    if (/\b(?:starting|started|begin|active|now|iniciado|comenz[oó]|ahora)\b/i.test(text)) return 'challenge';
-    return 'notice';
+    return match ? match[1] : 'challenge';
   }
 
-  function getVerificationNotices() {
-    const out = [];
-    const channels = window.gameClient?.interface?.channelManager?.channels || [];
-    for (const channel of channels) {
-      const entries = channel?.__contents || [];
-      for (let i = Math.max(0, entries.length - 16); i < entries.length; i += 1) {
-        const entry = entries[i];
-        const text = String(entry?.message || entry?.text || '').trim();
-        if (!text || text.length >= 500 || !verificationNoticePattern.test(text) ||
-            verificationCompletePattern.test(text)) continue;
-        // Stable semantic key also handles clients that clone chat entries
-        // on every __contents read. WeakSet alone would re-trigger old warnings.
-        const stamp = String(entry?.id ?? entry?.__id ?? entry?.__time ?? entry?.time ?? '');
-        const semanticKey = `${channel?.name||''}|${stamp}|${entry?.author||entry?.sender||''}|${text}`;
-        if (state.verificationSeenFallback.has(semanticKey)) continue;
-        state.verificationSeenFallback.add(semanticKey);
-        if (state.verificationSeenFallback.size > 1200) {
-          state.verificationSeenFallback = new Set(Array.from(state.verificationSeenFallback).slice(-800));
-        }
-        if (entry && typeof entry === 'object') state.verificationSeenEntries.add(entry);
-        out.push({ text:text.slice(0,160), key:`chat:${channel?.name||''}:${i}:${text}` });
-      }
+  // STRICT: a generic mention of bot/check/captcha by another player is NOT
+  // a system verification. Only explicit countdowns or the active challenge UI.
+  const verificationCountdownPattern = /(?:\b(?:60|30|15)\s*(?:seconds?|secs?|segundos?|segs?|s)\b[^\n]{0,70}\b(?:captcha|verification|verificaci[oó]n|anti[\s_-]*bot|bot[\s_-]*(?:test|check|challenge))\b|\b(?:captcha|verification|verificaci[oó]n|anti[\s_-]*bot|bot[\s_-]*(?:test|check|challenge))\b[^\n]{0,70}\b(?:60|30|15)\s*(?:seconds?|secs?|segundos?|segs?|s)\b)/i;
+  const verificationActiveUiPattern = /(?:captcha|anti[\s_-]*bot|verificaci[oó]n|verify (?:you are|you're) human|toca el objeto que se ilumin[oó]|touch the (?:object|item) that (?:lit up|was illuminated))/i;
+
+  function enqueueTrustedVerificationNotice(text, source, channel='Console', sender='Sistema') {
+    const plain=String(text||'').replace(/<[^>]*>/g,' ').replace(/\s+/g,' ').trim();
+    if (!plain || plain.length>400 || verificationCompletePattern.test(plain)) return false;
+    const strictCountdown=verificationCountdownPattern.test(plain);
+    if (source==='Console (sistema)' && !strictCountdown) return false;
+    if (source==='Ventana de verificación' && !verificationActiveUiPattern.test(plain)) return false;
+    if (state.verificationPendingNotices.length >= 25) state.verificationPendingNotices.shift();
+    state.verificationPendingNotices.push({text:plain.slice(0,160),source,channel,sender,at:Date.now()});
+    return true;
+  }
+
+  // The actual Minibia client routes server broadcasts to Console with
+  // ChannelManager.addConsoleMessage(). Never scan player chat or PM channels.
+  function watchVerificationSystemConsole() {
+    const manager=window.gameClient?.interface?.channelManager;
+    if (!manager || typeof manager.addConsoleMessage!=='function') return;
+    if (state.verificationBoundConsole?.manager === manager &&
+        manager.addConsoleMessage === state.verificationBoundConsole.wrapper) return;
+    if (state.verificationBoundConsole) {
+      const prev=state.verificationBoundConsole;
+      if (prev.manager.addConsoleMessage === prev.wrapper) prev.manager.addConsoleMessage=prev.original;
+      state.verificationBoundConsole=null;
     }
-    if (!document.body || typeof document.createTreeWalker !== 'function') return out;
-    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
-    let visited = 0;
-    let node;
-    while ((node = walker.nextNode()) && visited++ < 4000) {
-      const text = String(node.textContent || '').trim();
-      if (!text || text.length >= 350 || !verificationNoticePattern.test(text) ||
-          verificationCompletePattern.test(text)) continue;
-      const parent = node.parentElement;
-      if (!parent || parent.closest('#minibia-bot-panel, script, style, noscript, template')) continue;
-      if (parent.closest('[aria-hidden="true"], [hidden]')) continue;
-      if (typeof parent.getClientRects === 'function' && parent.getClientRects().length === 0) continue;
-      if (state.verificationSeenNodes.has(node)) continue;
-      state.verificationSeenNodes.add(node);
-      out.push({ text:text.slice(0,160), key:`dom:${text}` });
+    const original=manager.addConsoleMessage;
+    const wrapper=function(message, ...args) {
+      const result=original.call(this,message,...args);
+      if (config.pauseWaypointsOnVerification) {
+        enqueueTrustedVerificationNotice(message, 'Console (sistema)', 'Console', 'Sistema');
+      }
+      return result;
+    };
+    manager.addConsoleMessage=wrapper;
+    state.verificationBoundConsole={manager,original,wrapper};
+  }
+  bot.addCleanup?.(() => {
+    const old=state.verificationBoundConsole;
+    if (old && old.manager.addConsoleMessage===old.wrapper) old.manager.addConsoleMessage=old.original;
+    state.verificationBoundConsole=null;
+  });
+
+  // Only inspect an actual visible dedicated challenge dialog. We do not
+  // search all DOM text: that previously matched chat transcript text.
+  function getVisibleChallengeDialogNotices() {
+    if (!document.body) return [];
+    const out=[];
+    for (const node of document.querySelectorAll(
+      '#captcha-modal, #verification-modal, [data-testid="captcha-modal"], '+
+      '[data-testid="verification-modal"], [class~="captcha-modal"], '+
+      '[class~="verification-modal"], [id^="captcha-"], [id^="verification-"]')) {
+      if (node.closest('#minibia-bot-panel') || node.closest('#server-message, #notification')) continue;
+      if (node.closest('[hidden], [aria-hidden="true"]') || node.getClientRects?.().length===0) continue;
+      const text=String(node.textContent||'').replace(/\s+/g,' ').trim();
+      if (!text || text.length>350 || !verificationActiveUiPattern.test(text)) continue;
+      if (state.verificationDomSeen.get(node)===text) continue;
+      state.verificationDomSeen.set(node,text);
+      out.push({text:text.slice(0,160),source:'Ventana de verificación',channel:'Interfaz',sender:'Sistema',at:Date.now()});
     }
     return out;
-  }
-
-  function findVisibleVerificationNotice() {
-    // A read-only check used by diagnostics and manual restore; no consumption.
-    for (const channel of window.gameClient?.interface?.channelManager?.channels || []) {
-      const entries = channel?.__contents || [];
-      for (let i=entries.length-1; i>=Math.max(0,entries.length-8);i--) {
-        const text=String(entries[i]?.message || entries[i]?.text || '').trim();
-        if (text && verificationNoticePattern.test(text) && !verificationCompletePattern.test(text))
-          return {text:text.slice(0,160), key:`chat:${channel?.name||''}:${i}:${text}`};
-      }
-    }
-    return null;
   }
 
   function scanVerificationNotice() {
     if (!config.pauseWaypointsOnVerification) return;
     try {
-      // A separate safety module may stop Cave Bot while the challenge is up.
-      // Restore only the MOVEMENT hold, never auto-restart attack or walking.
-      // Auto Attack remains free to select/hit targets while stationary.
+      watchVerificationSystemConsole();
       if (state.pausedForVerification) {
-        bot.attack?.setMovementHold?.('verification', true);
+        bot.attack?.setMovementHold?.('verification',true);
         if (state.running) cancelOwnWaypointWalk();
       }
-      const notices = getVerificationNotices();
-      if (!notices.length) return;
-      let shouldSound = false;
+      const notices=state.verificationPendingNotices.splice(0).concat(getVisibleChallengeDialogNotices());
       for (const notice of notices) {
         if (!state.pausedForVerification) {
           saveVerificationSnapshot();
-          state.pausedForVerification = true;
+          state.pausedForVerification=true;
           cancelOwnWaypointWalk();
-          bot.attack?.setMovementHold?.('verification', true);
+          bot.attack?.setMovementHold?.('verification',true);
           bot.safeNavigation?.cancel?.('attack');
-          bot.log('verification warning: navigation held, stationary combat preserved');
+          bot.log('verified system challenge: movement held, stationary combat preserved');
         }
-        state.lastVerificationSeenAt = Date.now();
-        state.lastVerificationNotice = notice.text;
-        const phase = verificationPhase(notice.text);
-        state.verificationLastPhase = phase;
+        state.lastVerificationSeenAt=Date.now();
+        state.lastVerificationNotice=notice.text;
+        state.lastVerificationSource=notice.source;
+        state.lastVerificationChannel=notice.channel;
+        state.lastVerificationSender=notice.sender;
+        const phase=verificationPhase(notice.text);
+        state.verificationLastPhase=phase;
         if (!state.verificationAlarmedStages.has(phase)) {
           state.verificationAlarmedStages.add(phase);
-          shouldSound = true;
-          bot.log('verification warning phase', { phase, notice:notice.text });
+          bot.reportAlarm?.('captcha-'+phase, `Aviso de verificación ${phase}: ${notice.source}`,
+            'Movimiento y persecución pausados; Auto Attack estacionario conservado',
+            {source:notice.source,channel:notice.channel,sender:notice.sender,stage:phase,systemText:notice.text});
+          bot.log('verification warning confirmed', {phase,source:notice.source,channel:notice.channel,sender:notice.sender});
         }
       }
-      if (shouldSound) bot.playAlarm?.();
-    } catch (error) {
-      bot.log('verification notice check failed', error?.message || error);
-    }
+    } catch(error) { bot.log('verification notice check failed',error?.message||error); }
   }
 
   function restartVerificationScanner() {
     if (state.verificationTimerId != null) {
       window.clearInterval(state.verificationTimerId);
-      state.verificationTimerId = null;
+      state.verificationTimerId=null;
     }
+    state.verificationPendingNotices.length=0; // Never replay messages before enabling/reloading.
     if (!config.pauseWaypointsOnVerification) return;
+    watchVerificationSystemConsole();
     scanVerificationNotice();
-    state.verificationTimerId = window.setInterval(scanVerificationNotice, config.verificationScanTickMs);
+    state.verificationTimerId=window.setInterval(scanVerificationNotice,config.verificationScanTickMs);
   }
 
   // Special-status chat sender detector. No color-only guessing: colors are
   // themes and messages may quote role tags. Use the sender field/prefix only.
   const moderatorRolePattern = /\[(?:GOD|GM|CM|ADMIN|MODERATOR|MOD)\]/i;
+  // Exact-name evidence from the observed Minibia server; a purple chat
+  // colour or sudden appearance alone is not proof of moderator status.
+  const knownModeratorSenders = new Set(['god minibia']);
   function isModeratorSender(sender, role = "") {
     const text = String(sender || "").trim();
     const declaredRole = String(role || "").trim();
     if (moderatorRolePattern.test(text) || moderatorRolePattern.test(`[${declaredRole}]`)) return true;
+    const normalized = text.toLowerCase().replace(/\s+/g, ' ');
+    if (knownModeratorSenders.has(normalized)) return true;
     const gmNames = bot.panic?.config?.gameMasterNames || [];
-    return !!text && gmNames.some((name) => String(name || "").trim().toLowerCase() === text.toLowerCase());
+    return !!text && gmNames.some((name) => String(name || "").trim().toLowerCase() === normalized);
   }
 
   function isModeratorChatMessage(message) {
@@ -1975,34 +1993,62 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     state.moderatorSeen = new Set(moderatorChatSnapshot().map((msg) => msg.key));
   }
 
+  function pauseForModerator(sender, source = 'chat') {
+    if (!(state.running || bot.attack?.status?.()?.running)) return false;
+    const now=Date.now();
+    const alreadyPaused=now < state.pausedForModeratorUntil;
+    state.pausedForModeratorUntil=now+config.moderatorPauseMs;
+    state.moderatorLastSender=sender;
+    if (!alreadyPaused) {
+      cancelOwnWaypointWalk();
+      bot.attack?.setMovementHold?.('moderator', true);
+      bot.safeNavigation?.cancel?.('attack');
+      bot.reportAlarm?.('gm-'+source, `Posible moderador: ${sender}`,
+        `Movimiento en pausa ${Math.ceil(config.moderatorPauseMs/1000)} s; ataque estacionario`,
+        {source: source==='presence'?'Entidad reconocida cerca':'Mensaje de chat',
+          channel:source==='presence'?'mundo':'chat',sender});
+      bot.log('cave paused after moderator signal', {sender,source,seconds:config.moderatorPauseMs/1000});
+    }
+    return true;
+  }
+
+  function scanModeratorPresence() {
+    const me=normalizePosition(bot.getPlayerPosition?.());
+    if (!me) return;
+    const playerType=window.CONST?.TYPES?.PLAYER ?? 0;
+    const npcType=window.CONST?.TYPES?.NPC ?? 2;
+    const current=new Set();
+    for (const creature of Object.values(window.gameClient?.world?.activeCreatures || {})) {
+      if (!creature || (creature.type!==playerType && creature.type!==npcType)) continue;
+      const position=normalizePosition(creature.getPosition?.() || creature.__position);
+      if (!position || position.z!==me.z ||
+          Math.max(Math.abs(position.x-me.x),Math.abs(position.y-me.y))>8) continue;
+      const name=String(creature.name||'').trim();
+      if (!isModeratorSender(name, creature.role||creature.rank||'')) continue;
+      const key=`${creature.id ?? creature.__id ?? name}|${name.toLowerCase()}`;
+      current.add(key);
+      if (!state.moderatorPresenceSeen.has(key)) pauseForModerator(name,'presence');
+    }
+    // Re-arm only after the entity has left the observable area.
+    state.moderatorPresenceSeen=current;
+  }
+
   function scanModeratorChat() {
     if (!config.pauseOnModeratorMessage) return;
     try {
-      const messages = moderatorChatSnapshot();
+      scanModeratorPresence();
+      const messages=moderatorChatSnapshot();
       for (const msg of messages) {
         if (state.moderatorSeen.has(msg.key)) continue;
         state.moderatorSeen.add(msg.key);
-        if (state.moderatorSeen.size > 400) {
-          state.moderatorSeen = new Set(Array.from(state.moderatorSeen).slice(-250));
-        }
-        if (!(state.running || bot.attack?.status?.()?.running) ||
-            !isModeratorSender(msg.sender, msg.role)) continue;
-        const now = Date.now();
-        const alreadyPaused = now < state.pausedForModeratorUntil;
-        state.pausedForModeratorUntil = now + config.moderatorPauseMs;
-        state.moderatorLastSender = msg.sender;
-        if (!alreadyPaused) {
-          cancelOwnWaypointWalk();
-          bot.attack?.setMovementHold?.('moderator', true);
-          bot.safeNavigation?.cancel?.('attack');
-          bot.playAlarm?.();
-          bot.log('cave paused after moderator chat', { sender: msg.sender, seconds: config.moderatorPauseMs/1000 });
-        }
+        if (state.moderatorSeen.size>400)
+          state.moderatorSeen=new Set(Array.from(state.moderatorSeen).slice(-250));
+        if (!isModeratorSender(msg.sender,msg.role)) continue;
+        pauseForModerator(msg.sender,'chat');
       }
-      // Also expire movement hold if Cave Bot was not running when GM spoke.
       if (!state.running && state.pausedForModeratorUntil) processModeratorPause(Date.now());
-    } catch (error) {
-      bot.log('moderator chat scan failed', error?.message || error);
+    } catch(error) {
+      bot.log('moderator scan failed',error?.message||error);
     }
   }
 
@@ -2010,6 +2056,7 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     if (state.moderatorScannerTimerId != null) window.clearInterval(state.moderatorScannerTimerId);
     state.moderatorScannerTimerId = null;
     resetModeratorScanBaseline(); // Do not trigger on old chat history.
+    state.moderatorPresenceSeen=new Set();
     if (config.pauseOnModeratorMessage) {
       state.moderatorScannerTimerId = window.setInterval(scanModeratorChat, 500);
     }
@@ -2040,6 +2087,9 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     const snapshot = getVerificationSnapshot();
     state.pausedForVerification = false;
     state.lastVerificationNotice = null;
+    state.lastVerificationSource = null;
+    state.lastVerificationChannel = null;
+    state.lastVerificationSender = null;
     state.verificationLastPhase = null;
     state.verificationAlarmedStages.clear();
     state.lastPathAt = 0;
@@ -2205,6 +2255,11 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     if (!state.running || state.sellerTrip) return false;
     if (!force && !config.autoSellerVisit) return false;
     if (!force && Date.now() < state.sellerTripCooldownUntil) return false;
+    if (!force) {
+      const sale=bot.autoSell?.config;
+      if (!sale?.enabled || !sale.autoReturnAfterSale ||
+          !String(sale.npcName||'').trim() || !String(sale.allowedItems||'').trim()) return false;
+    }
     const seller = getValidatedSellerRoute(force);
     if (!seller) return false;
     const freeCapacity = Number(bot.getPlayerSnapshot?.()?.capacity);
@@ -2283,14 +2338,20 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
       const ok = start();
       return {ok, mode:ok?'hunt':null, reason:ok?'':'Cave Bot could not start'};
     }
-    const seller = getValidatedSellerRoute(true);
-    if (!seller) {
-      return {ok:false, reason:'Seller route is invalid. Select the saved Shanar route.'};
-    }
+    const seller = getValidatedSellerRoute(false);
     const sales=bot.autoSell?.config;
-    if (!sales?.enabled || !String(sales.allowedItems||'').trim() ||
-        sales.autoReturnAfterSale!==true || !String(sales.npcName||'').trim()) {
-      return {ok:false, reason:'HUNT + SELLER requires Auto Sell ON, NPC name, allowed items and Return to hunt ON.'};
+    const merchantReady=!!seller && !!sales?.enabled &&
+      !!String(sales.allowedItems||'').trim() && sales.autoReturnAfterSale===true &&
+      !!String(sales.npcName||'').trim();
+    // An incomplete OPTIONAL seller configuration must not suppress hunting.
+    // Never start an automated trip until both route and sale safeguards pass.
+    if (!merchantReady) {
+      const reason=!seller ? 'Shanar route is invalid' :
+        'Auto Sell must be ON with NPC name, allowed items and Return to hunt ON';
+      const ok=start();
+      bot.log('START HUNT: hunting only; automated selling pending configuration', {reason});
+      return {ok, mode:ok?'hunt-seller-pending':null,
+        reason:ok?`Caza activa; venta pendiente: ${reason}`:'Cave Bot could not start'};
     }
     const position = normalizePosition(bot.getPlayerPosition());
     if (!position) return {ok:false, reason:'Player position is unavailable'};
@@ -2315,7 +2376,14 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     const sellerCandidates=seller.sellerRoute.map((wp,i)=>({index:i,distance:reachable(wp)}))
       .filter((x)=>Number.isFinite(x.distance))
       .sort((a,b)=>a.distance-b.distance || b.index-a.index);
-    const nearbyHunt=huntCandidates[0]||null;
+    // START HUNT must work at an actual hunt spawn even when its nearest
+    // waypoint is beyond the six-tile merchant-connection tolerance. Validate
+    // a same-floor path before deciding whether to enter the seller corridor.
+    const additionalHuntCandidates=route.map((wp,i)=>({index:i,
+      distance:reachable(wp,24)}))
+      .filter(x=>x.index>=Math.min(entryWaypointCount,route.length-1) && Number.isFinite(x.distance))
+      .sort((a,b)=>a.distance-b.distance || a.index-b.index);
+    const nearbyHunt=huntCandidates[0]||additionalHuntCandidates[0]||null;
     const nearbySeller=sellerCandidates[0]||null;
     const merchantEnd=seller.sellerRoute[seller.sellerRoute.length-1];
     const nearSellerEnd=reachable(merchantEnd,3)<=3;
@@ -2613,7 +2681,7 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     if (destination?.z !== position.z) {
       if (!config.allowFloorTransitions) {
         bot.log('seller route blocked: explicit floor transitions are OFF');
-        stop();bot.playAlarm?.();return true;
+        stop();bot.reportAlarm?.('seller-floor-blocked', 'Viaje a Shanar: cambios de piso desactivados', 'Cave Bot detenido');return true;
       }
       state.expectedFloor=null;
       const previous = trip.phase === 'exit-hunt'
@@ -2653,11 +2721,12 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
       // resuming the route on another floor (never auto-recover via stairs).
       if (!config.allowFloorTransitions && state.expectedFloor !== null &&
           position && position.z !== state.expectedFloor) {
+        const expectedBeforeStop = state.expectedFloor;
         bot.log('UNEXPECTED FLOOR CHANGE: cave and melee stopped',
-          {expected:state.expectedFloor,observed:position.z});
+          {expected:expectedBeforeStop,observed:position.z});
         bot.attack?.stop?.();
         stop();
-        bot.playAlarm?.();
+        bot.reportAlarm?.('unexpected-floor', `Piso inesperado: esperaba ${expectedBeforeStop}, detectó ${position.z}`, 'Detuvo Cave Bot y Auto Attack');
         return;
       }
       // Moderator alert pauses movement ONLY; Auto Attack and Auto Heal keep running.
@@ -2791,7 +2860,7 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
           state.lastRoutePathError='floor transition blocked (enable intentional transitions explicitly)';
           state.lastRoutePathErrorAt=now;
           stop();
-          bot.playAlarm?.();
+          bot.reportAlarm?.('forbidden-floor', 'Waypoint requiere cambio de piso no autorizado', 'Detuvo Cave Bot');
           bot.log('cave stopped: waypoint requires a forbidden floor change',waypoint);
           return;
         }
@@ -3051,6 +3120,9 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
       pausedForFloorMove: state.pausedForFloorMove,
       pausedForVerification: state.pausedForVerification && config.pauseWaypointsOnVerification,
       lastVerificationNotice: state.lastVerificationNotice,
+      lastVerificationSource: state.lastVerificationSource,
+      lastVerificationChannel: state.lastVerificationChannel,
+      lastVerificationSender: state.lastVerificationSender,
       lastVerificationSeenAt: state.lastVerificationSeenAt,
       verificationLastPhase: state.verificationLastPhase,
       verificationSavedSetup: !!getVerificationSnapshot(),
@@ -3064,7 +3136,10 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
           sellerPresetName:sr.sellerPresetName } : {valid:false};
       })(),
       homeRouteValid: !!(config.homePresetName && getValidatedHomeRoute(false)),
-      freeCapacity: Number(bot.getPlayerSnapshot?.()?.capacity) || null,
+      freeCapacity: (() => {
+        const cap = bot.getPlayerSnapshot?.()?.capacity;
+        return cap == null ? null : (Number.isFinite(Number(cap)) ? Number(cap) : null);
+      })(),
     };
   }
 
