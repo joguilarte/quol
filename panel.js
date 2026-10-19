@@ -1232,6 +1232,121 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
         #minibia-bot-panel .mb-quick-routes {grid-template-columns:1fr;}
         #minibia-bot-panel .mb-quick-group .mb-quick-category {flex-basis:auto;}
       }
+      /* V24 final layout fix: each section is only as high as its content.
+         Earlier compact CSS set .mb-quick-training to flex-basis:520px,
+         which became 520px of HEIGHT in the later column layout. */
+      #minibia-bot-panel .mb-quick-bar {
+        display:flex; flex-direction:column; align-items:stretch;
+        justify-content:flex-start; align-content:normal;
+        gap:7px; padding:10px;
+        width:100%; min-width:0; height:auto; min-height:0;
+      }
+      #minibia-bot-panel .mb-quick-bar > * {min-width:0;flex:0 0 auto;}
+      #minibia-bot-panel .mb-quick-head {
+        display:flex; align-items:center; justify-content:space-between;
+        gap:8px; flex-wrap:wrap; font-size:12px;
+      }
+      #minibia-bot-panel .mb-quick-routes {
+        display:grid; grid-template-columns:repeat(3,minmax(0,1fr));
+        gap:8px; align-items:start;
+      }
+      #minibia-bot-panel .mb-quick-core {display:flex;flex-wrap:wrap;gap:5px 12px;align-items:center;padding:2px 0;}
+      #minibia-bot-panel .mb-quick-tools {
+        display:grid; grid-template-columns:repeat(2,minmax(0,1fr));
+        gap:8px; align-items:start!important; align-content:start;
+        grid-auto-rows:max-content; min-height:0; height:auto;
+      }
+      #minibia-bot-panel .mb-quick-tools > .mb-quick-group {
+        display:flex; flex-direction:column; justify-content:flex-start;
+        align-items:stretch; align-self:start!important;
+        flex:0 0 auto!important; height:auto!important; min-height:0!important;
+        gap:6px; padding:8px 9px; margin:0; min-width:0;
+        border:1px solid rgba(224,200,148,.28);
+        background:rgba(15,12,8,.26);border-radius:6px;
+      }
+      #minibia-bot-panel .mb-quick-tools .mb-quick-group > * {
+        flex:0 0 auto!important; min-height:0;
+      }
+      #minibia-bot-panel .mb-quick-group .mb-quick-category {
+        flex:0 0 auto!important; display:block;
+        padding:0 0 5px; margin:0 0 1px; border-bottom:1px solid rgba(224,200,148,.18);
+        color:#e9d6a4; font-size:12px; line-height:1.3;
+      }
+      #minibia-bot-panel .mb-quick-group .mb-quick-training {
+        display:flex!important; flex:0 0 auto!important;
+        flex-basis:auto!important; height:auto!important; min-height:0!important;
+        align-items:center!important;justify-content:flex-start!important;
+        gap:6px!important; margin:0!important; padding:0!important;
+        flex-wrap:wrap!important;
+      }
+      #minibia-bot-panel .mb-quick-group .mb-quick-training > * {flex:0 0 auto!important;min-width:0;}
+      #minibia-bot-panel .mb-quick-group .mb-quick-training .mb-field {
+        display:inline-flex!important; flex-direction:row!important; align-items:center!important;
+        gap:4px!important; margin:0!important;
+      }
+      #minibia-bot-panel .mb-quick-group .mb-quick-training .mb-field-label {white-space:nowrap;}
+      #minibia-bot-panel .mb-quick-group .mb-quick-settings {
+        display:flex; flex-wrap:wrap; align-items:center; justify-content:flex-start;
+        flex:0 0 auto!important; min-height:0;
+        padding:0; gap:5px 11px;
+      }
+      #minibia-bot-panel .mb-quick-group .mb-quick-inline-tools {
+        display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px;
+        flex:0 0 auto!important; padding:0;
+      }
+      #minibia-bot-panel .mb-quick-group .mb-quick-inline-tools label {
+        display:inline-flex;flex:0 1 auto!important;align-items:center;gap:4px;
+        max-width:none;font-size:11px;min-width:0;
+      }
+      #minibia-bot-panel .mb-quick-group .mb-quick-inline-tools input {
+        flex:0 1 110px; width:110px;max-width:130px;min-width:0;
+        height:25px;padding:3px 6px;
+      }
+      #minibia-bot-panel .mb-quick-group .mb-quick-inline-tools button,
+      #minibia-bot-panel .mb-quick-group .mb-quick-actions button {
+        width:auto; min-width:0; flex:0 0 auto;
+        font-size:11px; padding:5px 8px; line-height:1.3;
+      }
+      #minibia-bot-panel .mb-quick-group .mb-quick-route {
+        display:flex;align-items:center;gap:8px;max-width:100%;
+        flex:0 0 auto!important;font-size:11px;
+      }
+      #minibia-bot-panel .mb-quick-group .mb-quick-route input,
+      #minibia-bot-panel .mb-quick-group .mb-quick-route textarea {
+        width:190px;max-width:min(100%,230px);height:26px;
+        min-height:26px;max-height:42px;padding:3px 7px;
+      }
+      #minibia-bot-panel .mb-quick-group .mb-quick-route textarea {height:32px;}
+      #minibia-bot-panel .mb-quick-group .mb-quick-settings .mb-toggle {font-size:11px;white-space:nowrap;}
+      #minibia-bot-panel .mb-quick-group .mb-quick-actions {gap:5px;align-items:center;}
+      #minibia-bot-panel .mb-quick-group .mb-small-note:not(#minibia-bot-quick-floor-status) {display:none;}
+      #minibia-bot-panel #minibia-bot-quick-floor-status {font-size:10px;line-height:1.3;}
+      #minibia-bot-panel .mb-quick-summary {
+        white-space:normal;overflow:visible;text-overflow:clip;
+        line-height:1.3;font-size:11px;
+      }
+      #minibia-bot-panel #minibia-bot-quick-start {font-weight:700;background:#795b30;}
+      @container (max-width:850px) {
+        #minibia-bot-panel .mb-quick-tools {grid-template-columns:1fr;}
+        #minibia-bot-panel .mb-quick-routes {grid-template-columns:1fr;}
+      }
+      @container (max-width:540px) {
+        #minibia-bot-panel .mb-quick-core .mb-toggle {white-space:normal;}
+        #minibia-bot-panel .mb-quick-actions button {white-space:normal;}
+      }
+      /* Independent-height columns: no equal-height rows, no giant empty panels. */
+      #minibia-bot-panel .mb-quick-tools {
+        display:block!important;
+        column-count:2;column-gap:9px;
+        height:auto;min-height:0;
+      }
+      #minibia-bot-panel .mb-quick-tools > .mb-quick-group {
+        break-inside:avoid;page-break-inside:avoid;
+        width:100%;margin:0 0 9px!important;
+      }
+      @container (max-width:850px) {
+        #minibia-bot-panel .mb-quick-tools {column-count:1;}
+      }
       /* Compact emergency handle: always on top, independently draggable and keyboard accessible. */
       #minibia-bot-emergency-stop {
         box-sizing:border-box; position:fixed; bottom:16px; left:16px; width:44px; height:44px;
