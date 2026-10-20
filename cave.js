@@ -1618,13 +1618,19 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     const exactTile = getTileAt(anchor);
     if (isTransitionCandidateTile(exactTile, waypoint, anchor))
       return { tile: exactTile, position: anchor };
-    // The recorded point may be ONE square beside the stairs or stone.
-    // Multiple candidates are ambiguous: stop rather than enter a random one.
-    const nearby = getNearbyTransitionTiles(anchor, waypoint, 1)
+    // A saved waypoint can be a few tiles BEFORE the real stair. The previous
+    // one-tile limit incorrectly rejected valid, visible transitions on the
+    // reversed Shanar route. Expand ONLY around the recorded same-floor point;
+    // never search for arbitrary stairs around the player or destination.
+    // A single match is required: if there are two stairs/holes, STOP rather
+    // than choosing based on distance or stepping onto the wrong floor.
+    const MAX_RECORDED_STAIR_OFFSET = 3;
+    const nearby = getNearbyTransitionTiles(anchor, waypoint, MAX_RECORDED_STAIR_OFFSET)
       .filter((entry) => Math.max(
         Math.abs(entry.position.x-anchor.x), Math.abs(entry.position.y-anchor.y)
-      ) <= 1);
-    return nearby.length === 1 ? nearby[0] : null;
+      ) <= MAX_RECORDED_STAIR_OFFSET);
+    if (nearby.length !== 1) return null;
+    return nearby[0];
   }
 
   function warnBlockedFloorChange(waypoint, reason, now) {
@@ -1666,8 +1672,15 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
       return true;
     }
     if (recordedAnchor) {
-      warnBlockedFloorChange(waypoint,
-        'recorded transition missing/blocked: put a waypoint ON or BESIDE the stairs/stone', now);
+      const candidates = getNearbyTransitionTiles(recordedAnchor, waypoint, 3)
+        .filter((entry) => Math.max(Math.abs(entry.position.x-recordedAnchor.x),
+          Math.abs(entry.position.y-recordedAnchor.y)) <= 3);
+      const reason = candidates.length > 1
+        ? `Transición ambigua: ${candidates.length} escaleras/agujeros visibles cerca de WP (${recordedAnchor.x},${recordedAnchor.y},${recordedAnchor.z}). Grabá WP junto a la correcta.`
+        : candidates.length === 1
+        ? `Escalera grabada localizada pero inaccesible desde la posición actual; revisar obstáculo y waypoint (${recordedAnchor.x},${recordedAnchor.y},${recordedAnchor.z}).`
+        : `Sin transición reconocible a 3 casillas del WP (${recordedAnchor.x},${recordedAnchor.y},${recordedAnchor.z}). Grabá un waypoint junto a la escalera.`;
+      warnBlockedFloorChange(waypoint, reason, now);
       return false;
     }
 

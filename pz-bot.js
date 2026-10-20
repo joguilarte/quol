@@ -6047,13 +6047,19 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     const exactTile = getTileAt(anchor);
     if (isTransitionCandidateTile(exactTile, waypoint, anchor))
       return { tile: exactTile, position: anchor };
-    // The recorded point may be ONE square beside the stairs or stone.
-    // Multiple candidates are ambiguous: stop rather than enter a random one.
-    const nearby = getNearbyTransitionTiles(anchor, waypoint, 1)
+    // A saved waypoint can be a few tiles BEFORE the real stair. The previous
+    // one-tile limit incorrectly rejected valid, visible transitions on the
+    // reversed Shanar route. Expand ONLY around the recorded same-floor point;
+    // never search for arbitrary stairs around the player or destination.
+    // A single match is required: if there are two stairs/holes, STOP rather
+    // than choosing based on distance or stepping onto the wrong floor.
+    const MAX_RECORDED_STAIR_OFFSET = 3;
+    const nearby = getNearbyTransitionTiles(anchor, waypoint, MAX_RECORDED_STAIR_OFFSET)
       .filter((entry) => Math.max(
         Math.abs(entry.position.x-anchor.x), Math.abs(entry.position.y-anchor.y)
-      ) <= 1);
-    return nearby.length === 1 ? nearby[0] : null;
+      ) <= MAX_RECORDED_STAIR_OFFSET);
+    if (nearby.length !== 1) return null;
+    return nearby[0];
   }
 
   function warnBlockedFloorChange(waypoint, reason, now) {
@@ -6095,8 +6101,15 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
       return true;
     }
     if (recordedAnchor) {
-      warnBlockedFloorChange(waypoint,
-        'recorded transition missing/blocked: put a waypoint ON or BESIDE the stairs/stone', now);
+      const candidates = getNearbyTransitionTiles(recordedAnchor, waypoint, 3)
+        .filter((entry) => Math.max(Math.abs(entry.position.x-recordedAnchor.x),
+          Math.abs(entry.position.y-recordedAnchor.y)) <= 3);
+      const reason = candidates.length > 1
+        ? `Transición ambigua: ${candidates.length} escaleras/agujeros visibles cerca de WP (${recordedAnchor.x},${recordedAnchor.y},${recordedAnchor.z}). Grabá WP junto a la correcta.`
+        : candidates.length === 1
+        ? `Escalera grabada localizada pero inaccesible desde la posición actual; revisar obstáculo y waypoint (${recordedAnchor.x},${recordedAnchor.y},${recordedAnchor.z}).`
+        : `Sin transición reconocible a 3 casillas del WP (${recordedAnchor.x},${recordedAnchor.y},${recordedAnchor.z}). Grabá un waypoint junto a la escalera.`;
+      warnBlockedFloorChange(waypoint, reason, now);
       return false;
     }
 
@@ -11576,6 +11589,28 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
         }
       }
     `;
+    // Compact seller controls: full width at the top, never a stretched grid row.
+    style.textContent += `
+      #minibia-bot-panel .mb-essential-seller {display:flex!important;flex-direction:column!important;
+        align-items:stretch!important;gap:5px!important;margin:7px 0!important;
+        padding:9px 10px!important;border:1px solid rgba(200,175,120,.34)!important;
+        border-radius:6px!important;min-height:0!important;height:auto!important;}
+      #minibia-bot-panel .mb-essential-seller-toggles {display:flex!important;flex-wrap:wrap!important;
+        gap:5px 15px!important;align-items:center!important;}
+      #minibia-bot-panel .mb-essential-seller-fields {display:grid!important;
+        grid-template-columns:minmax(145px,1fr) minmax(170px,2fr)!important;gap:8px!important;align-items:start!important;}
+      #minibia-bot-panel .mb-essential-seller-fields label {display:flex!important;flex-direction:column!important;
+        min-width:0!important;margin:0!important;gap:3px!important;font-size:11px!important;}
+      #minibia-bot-panel .mb-essential-seller-fields input {width:100%!important;max-width:100%!important;
+        box-sizing:border-box!important;height:27px!important;}
+      #minibia-bot-panel .mb-essential-seller-actions {display:flex!important;flex-wrap:wrap!important;gap:7px!important;}
+      #minibia-bot-panel .mb-essential-seller-status {display:flex!important;flex-wrap:wrap!important;
+        column-gap:15px!important;row-gap:4px!important;font-size:11px!important;}
+      #minibia-bot-panel .mb-essential-seller-status .mb-small-note {margin:0!important;}
+      @container (max-width:610px) {
+        #minibia-bot-panel .mb-essential-seller-fields {grid-template-columns:1fr!important;}
+      }
+    `;
     document.head.appendChild(style);
 
     const panel = document.createElement("div");
@@ -12414,6 +12449,45 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
       if(corpseCard){corpseCard.classList.add('mb-cave-card');caveBody.append(corpseCard);}
       if(combatCard){combatCard.classList.add('mb-cave-card');caveBody.append(combatCard);}
     }
+    // SELLER UX: move EXISTING controls to Essentials, without cloning configuration.
+    // The advanced Auto Sell inputs remain the unique targets for existing listeners.
+    // Quick controls use the existing synchronization callbacks.
+    const sellerEssentials = document.createElement('section');
+    sellerEssentials.className = 'mb-essential-seller';
+    sellerEssentials.innerHTML = '<strong class="mb-label">VENTA AUTOMÁTICA · Shanar</strong><div class="mb-essential-seller-toggles"></div><div class="mb-essential-seller-fields"></div><div class="mb-essential-seller-actions"></div><div class="mb-essential-seller-status"></div>';
+    const quickSellerGroup = quickBar.querySelector('#minibia-bot-quick-group-waypoints');
+    const sellerToggles = sellerEssentials.querySelector('.mb-essential-seller-toggles');
+    const sellerFields = sellerEssentials.querySelector('.mb-essential-seller-fields');
+    const sellerActions = sellerEssentials.querySelector('.mb-essential-seller-actions');
+    const sellerStatuses = sellerEssentials.querySelector('.mb-essential-seller-status');
+    const moveSellerControl = (id, destination) => {
+      const control = panel.querySelector('#' + id);
+      const label = control?.closest('label');
+      if (label) destination.append(label); // MOVE, never clone, preserving listeners/IDs.
+    };
+    for (const id of ['minibia-bot-quick-sell-enabled',
+                      'minibia-bot-quick-sell-return',
+                      'minibia-bot-seller-fight-outbound',
+                      'minibia-bot-seller-fight-return']) moveSellerControl(id, sellerToggles);
+    for (const id of ['minibia-bot-auto-sell-npc',
+                      'minibia-bot-quick-sell-items']) moveSellerControl(id, sellerFields);
+    const saleButton = panel.querySelector('#minibia-bot-auto-sell-test');
+    if (saleButton) {
+      saleButton.textContent = 'VENDER AHORA (junto al NPC)';
+      sellerActions.append(saleButton);
+    }
+    for (const id of ['minibia-bot-auto-sell-status', 'minibia-bot-seller-status']) {
+      const status = panel.querySelector('#' + id);
+      if (status) sellerStatuses.append(status);
+    }
+    const essentialsButtons = quickBar.querySelector('.mb-quick-actions');
+    const essentialsSellerInsert = essentialsButtons || quickBar.querySelector('.mb-quick-summary');
+    if (essentialsSellerInsert) essentialsSellerInsert.before(sellerEssentials);
+    // The original sale card contains only descriptive text after the controls move.
+    // Keep it out of view; every operational control remains visible at the top.
+    const obsoleteSaleCard = quickBar.querySelector('.mb-cave-card[data-section="auto-sell"]');
+    if (obsoleteSaleCard) wiringDock.append(obsoleteSaleCard);
+
     // One refreshable Auto Heal group in Essentials, one Gemini configuration,
     // one Anti Detection, one Cave Bot. Keep the remaining original nodes mounted,
     // invisible, because event bindings query them by ID after this point.
