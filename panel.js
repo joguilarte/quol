@@ -1575,6 +1575,47 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
         #minibia-bot-panel .mb-essential-seller-fields {grid-template-columns:1fr!important;}
       }
     `;
+    style.textContent += `
+      /* Final: real adaptive columns based on panel width, not viewport width. */
+      #minibia-bot-panel .mb-quick-tools {
+        display:block!important;column-count:1!important;column-gap:10px!important;
+      }
+      #minibia-bot-panel .mb-quick-tools>.mb-quick-group {
+        display:inline-block!important;vertical-align:top!important;width:100%!important;
+        margin:0 0 9px!important;box-sizing:border-box!important;break-inside:avoid!important;
+        height:auto!important;min-height:0!important;
+      }
+      #minibia-bot-panel .mb-quick-routes {grid-template-columns:1fr!important;}
+      #minibia-bot-panel .mb-main-cave-section>.mb-stack {grid-template-columns:1fr!important;align-items:start!important;}
+      @container (min-width:920px) {
+        #minibia-bot-panel .mb-quick-tools {column-count:2!important;}
+        #minibia-bot-panel .mb-quick-routes {grid-template-columns:repeat(2,minmax(0,1fr))!important;}
+        #minibia-bot-panel .mb-main-cave-section>.mb-stack {grid-template-columns:repeat(2,minmax(0,1fr))!important;}
+      }
+      @container (min-width:1420px) {
+        #minibia-bot-panel .mb-quick-tools {column-count:3!important;}
+        #minibia-bot-panel .mb-quick-routes {grid-template-columns:repeat(3,minmax(0,1fr))!important;}
+        #minibia-bot-panel .mb-main-cave-section>.mb-stack {grid-template-columns:repeat(3,minmax(0,1fr))!important;}
+      }
+      #minibia-bot-panel .mb-main-cave-section>.mb-stack>.mb-cave-card {height:auto!important;align-self:start!important;}
+      #minibia-bot-panel .mb-quick-profiles {
+        display:flex;flex-wrap:wrap;gap:7px;align-items:center;border:1px solid rgba(224,200,148,.24);
+        border-radius:7px;padding:7px 9px;max-width:100%;box-sizing:border-box;
+      }
+      #minibia-bot-panel .mb-quick-profiles select {min-width:150px;max-width:240px;flex:1 1 150px;}
+      #minibia-bot-panel .mb-quick-profiles button {width:auto!important;padding:5px 10px!important;}
+      #minibia-bot-panel .mb-quick-profiles small {font-size:11px;color:#d6c18f;}
+      #minibia-bot-emergency-stop {
+        width:124px!important;height:44px!important;border-radius:14px!important;
+        border:1px solid rgba(255,255,255,.55)!important;
+        box-shadow:0 4px 16px rgba(0,0,0,.68)!important;
+        font:700 12px Verdana,sans-serif!important;letter-spacing:.35px!important;
+        opacity:.94!important;touch-action:none;
+      }
+      #minibia-bot-emergency-stop[data-mode='start'] {background:#276042!important;}
+      #minibia-bot-emergency-stop[data-mode='resume'] {background:#276042!important;}
+      #minibia-bot-emergency-stop[data-mode='stop'] {background:#a62525!important;}
+    `;
     document.head.appendChild(style);
 
     const panel = document.createElement("div");
@@ -1899,6 +1940,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
                 <input type="checkbox" id="minibia-bot-cave-verification-pause" />
                 <span>Pause waypoints on anti-bot notice</span>
               </label>
+              <label class="mb-toggle"><input type="checkbox" id="minibia-bot-cave-verification-auto-resume"/><span>Reanudar automáticamente al completar el CAPTCHA</span></label>
               <label class="mb-field" for="minibia-bot-cave-verification-tick">
                 <span class="mb-field-label">Notice scan tick (ms, 200-5000)</span>
                 <input type="number" id="minibia-bot-cave-verification-tick" min="200" max="5000" step="100" value="500" />
@@ -1907,7 +1949,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
                 <button type="button" class="mb-small-button" id="minibia-bot-cave-test-alarm">Test Loud Alarm</button>
                 <button type="button" class="mb-small-button" id="minibia-bot-cave-resume-verification">RESTORE AFTER CAPTCHA</button>
               </div>
-              <div class="mb-small-note">Alarms at 60, 30 and 15 second warnings (once per phase). Navigation/chase stop; Attack keeps targeting without following, and Heal remains on if previously enabled. After resolving the challenge, RESTORE re-enables only previously running modules. This does not complete CAPTCHA.</div>
+              <div class="mb-small-note">Alarma 60/30/15s, ataque estacionario y Auto Heal. Auto-reanudar solo tras confirmación del servidor o cierre del desafío después de una secuencia manual válida; el botón RESTORE sigue disponible. No resuelve el CAPTCHA.</div>
               <div class="mb-actions mb-actions-inline-two">
                 <button type="button" class="mb-small-button" id="minibia-bot-cave-start">Start</button>
                 <button type="button" class="mb-small-button" id="minibia-bot-cave-stop">Stop</button>
@@ -2465,6 +2507,74 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     if(previousCaption)previousCaption.textContent='Activá lo necesario y presioná START HUNT';
     if(quickBar.querySelector('#minibia-bot-quick-resume-notice'))
       quickBar.querySelector('#minibia-bot-quick-resume-notice').textContent='REANUDAR TRAS CAPTCHA';
+    // Named Quick profiles: save the existing module configurations. Routes
+    // remain Cave presets; never snapshot credentials or the current session.
+    const quickProfilesKey='minibiaBot.ui.quickProfiles.v1';
+    const profileRow=document.createElement('div');
+    profileRow.className='mb-quick-profiles';
+    profileRow.innerHTML='<strong>Mi configuración</strong><select id="minibia-bot-profile-list" aria-label="Configuración guardada"></select><button type="button" id="minibia-bot-profile-save">GUARDAR</button><button type="button" id="minibia-bot-profile-apply">APLICAR</button><small id="minibia-bot-profile-msg" aria-live="polite">Persistente en este navegador</small>';
+    const profileInsert=quickBar.querySelector('.mb-quick-routes') || quickBar.querySelector('.mb-quick-head');
+    if(profileInsert) profileInsert.before(profileRow);
+    const profileSelect=profileRow.querySelector('#minibia-bot-profile-list');
+    const profileMsg=profileRow.querySelector('#minibia-bot-profile-msg');
+    const profileModules=['cave','attack','heal','rune','talk','panic','eat','invisible','magicShield','equipRing','floorMove','corpseLoot','autoSell'];
+    const safeConfig=(name)=>{
+      const src=bot[name]?.status?.()?.config || bot[name]?.config || {};
+      return Object.fromEntries(Object.entries(src).filter(([k,v])=>
+        !/(?:key|token|secret|password|credential)/i.test(k) &&
+        ['string','number','boolean'].includes(typeof v) ||
+        (Array.isArray(v) && !/(?:key|token|secret|password|credential)/i.test(k))));
+    };
+    const readProfiles=()=>{
+      const data=bot.storage.get(quickProfilesKey,{});
+      return data && typeof data==='object' && !Array.isArray(data) ? data : {};
+    };
+    function renderProfiles(want){
+      const data=readProfiles();profileSelect.replaceChildren();
+      for(const name of Object.keys(data).sort()){
+        const opt=document.createElement('option');opt.value=name;opt.textContent=name;profileSelect.append(opt);
+      }
+      if(want && data[want])profileSelect.value=want;
+      if(!profileSelect.options.length){const opt=document.createElement('option');opt.value='';opt.textContent='Sin perfiles';profileSelect.append(opt);}
+    }
+    renderProfiles();
+    profileRow.querySelector('#minibia-bot-profile-save').addEventListener('click',()=>{
+      const defaultName=profileSelect.value || 'Mi Hunt';
+      const name=String(window.prompt('Nombre de configuración:',defaultName)||'').trim().slice(0,48);
+      if(!name)return;
+      const profiles=readProfiles();
+      const modules={};for(const moduleName of profileModules){modules[moduleName]=safeConfig(moduleName);}
+      profiles[name]={version:1,createdAt:Date.now(),modules,
+        huntPreset:bot.cave?.getActivePresetName?.()||null};
+      bot.storage.set(quickProfilesKey,profiles);renderProfiles(name);
+      profileMsg.textContent='Guardado: '+name+' · sin API key';
+    });
+    profileRow.querySelector('#minibia-bot-profile-apply').addEventListener('click',()=>{
+      const name=profileSelect.value;const profile=readProfiles()[name];if(!profile?.modules)return;
+      // Apply with modules OFF to avoid movement/attack triggered by a profile
+      // switch. START HUNT is the explicit action to begin the route.
+      if(bot.cave?.status?.()?.running){profileMsg.textContent='Detené la hunt antes de aplicar otro perfil';return;}
+      const failure=[];
+      try {if(profile.huntPreset)bot.cave?.loadPreset?.(profile.huntPreset);} catch(e){failure.push('ruta');}
+      for(const moduleName of profileModules){
+        if(!profile.modules[moduleName] || typeof bot[moduleName]?.updateConfig!=='function')continue;
+        try {
+          const next={...profile.modules[moduleName]};
+          delete next.apiKey;
+          bot[moduleName].updateConfig(next);
+        }catch(e){failure.push(moduleName);}
+      }
+      // Reinject just the view so all current controls use the ORIGINAL
+      // status/refresh handlers, never duplicates. This is not a full reload.
+      profileMsg.textContent=failure.length?'Revisar: '+failure.join(', '):'Aplicado: '+name+' · pulsá START HUNT';
+      if(!failure.length){
+        for(const fn of ['refreshAutoHealStatus','refreshRuneStatus','refreshAutoAttackStatus',
+          'refreshCaveStatus','refreshCavePresetControls','refreshTalkStatus','refreshPanicStatus']){
+          try {bot.ui?.[fn]?.();}catch(_){}
+        }
+        refreshQuickSummary?.();
+      }
+    });
     // No nested disclosure menus: all functional sections stay in this one window.
     const emergencyButton = document.createElement("button");
     emergencyButton.id = "minibia-bot-emergency-stop";
@@ -2478,21 +2588,38 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     function refreshEmergencyButton() {
       const emergency=bot.emergencyState?.()||{};
       const halted=!!emergency.halted;
+      const movementActive=bot.cave?.status?.()?.running===true;
+      const otherActive=['attack','rune','heal','talk'].some(k=>bot[k]?.status?.()?.running===true);
+      const state=halted ? 'resume' : (movementActive||otherActive ? 'stop':'start');
+      emergencyButton.dataset.mode=state;
       emergencyButton.dataset.halted=String(halted);
-      emergencyButton.textContent=halted ? '▶' : '■';
-      emergencyButton.setAttribute('aria-label',halted ?
-        (emergency.canResume ? 'RESUME previous modules (Ctrl+Shift+X)' : 'Stopped: reload lost resume snapshot; use Quick Hunt') :
-        'EMERGENCY STOP (Ctrl+Shift+X)');
-      emergencyButton.title=halted ? (emergency.canResume ? 'RESUME ONLY previously active modules · Ctrl+Shift+X' :
-        'Manual restart needed; snapshot not available after reload') : 'STOP ALL · Ctrl+Shift+X · Drag to reposition';
+      emergencyButton.textContent=state==='stop'?'■ PAUSAR':state==='resume'?'▶ REANUDAR':'▶ INICIAR';
+      emergencyButton.title=state==='stop'?'PAUSAR todo y guardar estado · Ctrl+Shift+X':
+        state==='resume'?(emergency.canResume?'RESTAURAR módulos previos':'Sin sesión guardada: iniciar ruta manualmente'):
+        'Iniciar Hunt con la ruta guardada · Ctrl+Shift+X siempre detiene';
+      emergencyButton.setAttribute('aria-label',emergencyButton.title);
     }
-    function triggerEmergencyStop() {
-      if (bot.emergencyState?.().halted) {
-        if (!bot.emergencyResume?.()) console.warn('[minibia-bot] emergency resume incomplete/unavailable');
-      } else bot.emergencyStop?.();
+    function triggerEmergencyStop(fromHotkey=false) {
+      const emergency=bot.emergencyState?.()||{};
+      if(emergency.halted){
+        if(emergency.canResume){
+          if(!bot.emergencyResume?.()) console.warn('[minibia-bot] restore incomplete: check Essentials');
+        }else{
+          // Recovered tab with no live snapshot. An explicit click STARTS the
+          // configured hunt; it must NEVER silently resume on page reload.
+          bot.emergencyDismiss?.();
+          if(!bot.cave?.startHuntCycle?.()?.ok) console.warn('[minibia-bot] HUNT could not start; inspect Essentials');
+        }
+      } else if(fromHotkey || bot.cave?.status?.()?.running ||
+          ['attack','rune','heal','talk'].some(k=>bot[k]?.status?.()?.running===true)) {
+        bot.emergencyStop?.();
+      } else {
+        const started=bot.cave?.startHuntCycle?.();
+        if(!started?.ok)console.warn('[minibia-bot] HUNT could not start',started);
+      }
       refreshEmergencyButton();
     }
-    const emergencyDiameter = 44;
+    const emergencyDiameter = 124;
     const clampEmergency = (x, y) => ({
       left: Math.max(0, Math.min(Math.max(0, window.innerWidth - emergencyDiameter), x)),
       top: Math.max(0, Math.min(Math.max(0, window.innerHeight - emergencyDiameter), y)),
@@ -2551,11 +2678,11 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
       event.preventDefault();
       event.stopImmediatePropagation();
       if (emergencyDragged) { emergencyDragged = false; return; }
-      triggerEmergencyStop();
+      triggerEmergencyStop(false);
     });
     const emergencyHotkey = (event) => {
       if (event.ctrlKey && event.shiftKey && event.code === "KeyX" && !event.repeat) {
-        event.preventDefault(); event.stopImmediatePropagation(); triggerEmergencyStop();
+        event.preventDefault(); event.stopImmediatePropagation(); triggerEmergencyStop(true);
       }
     };
     const repositionEmergencyOnResize = () => {
@@ -2703,6 +2830,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
       mirror('minibia-bot-cave-route-mode',caveConfig.routeTraversalMode||'pingpong');
       mirror('minibia-bot-cave-moderator-pause',caveConfig.pauseOnModeratorMessage===true);
       mirror('minibia-bot-cave-verification-pause',caveConfig.pauseWaypointsOnVerification===true);
+      mirror('minibia-bot-cave-verification-auto-resume',caveConfig.autoResumeAfterVerification!==false);
       mirror('minibia-bot-panic-unknown-alarm',bot.panic?.config?.unknownPlayerSoundAlertEnabled===true);
       mirror('minibia-bot-panic-smart-chat',bot.panic?.config?.smartChatAlertEnabled===true);
       mirror('minibia-bot-cave-limit-chase',caveConfig.limitChaseToRoute===true);
@@ -2791,7 +2919,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
       if (!holdLabel) return;
       const reasons=[];
       if (em.halted) reasons.push('EMERGENCY STOP: usar botón de recuperación');
-      if (c.pausedForVerification) reasons.push(`Verificación detectada en ${c.lastVerificationSource||'origen desconocido'}: resolver y pulsar RESTORE CAPTCHA`);
+      if (c.pausedForVerification) reasons.push(`CAPTCHA: ${c.verificationAutoResume?.reason||'esperando resolución'}; ${c.verificationAutoResume?.enabled?'autorreanudar activado':'RESTORE manual'}`);
       if (c.moderatorPaused) reasons.push(`GM: pausa temporal (${Math.ceil((c.moderatorPauseRemainingMs||0)/1000)} s)`);
       if (p.pendingReturn) reasons.push('Panic Runner: retorno pendiente');
       if (c.lastRoutePathError && c.lastRoutePathErrorAt && Date.now()-c.lastRoutePathErrorAt<90000)
@@ -2844,7 +2972,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
       quickStatus.textContent=em?.halted ? (em.canResume ? 'Emergency paused. Use ▶ to resume previous modules.' : 'Emergency paused; reload cleared resume snapshot.') :
         (trip?.kind==='home' ? (trip.phase==='waiting-at-home'?'At HOME — choose GO HUNT to return':'Home travel: '+trip.phase) :
         (caveStatus.moderatorPaused ? 'GM ALERT: standing still; attack in place; alarm sounded' :
-        caveStatus.pausedForVerification ? `CAPTCHA ALERT ${caveStatus.verificationLastPhase||''}: stationary attack, press RESTORE after solving` :
+        caveStatus.pausedForVerification ? `CAPTCHA ${caveStatus.verificationLastPhase||''}: ataque quieto; ${caveStatus.verificationAutoResume?.enabled?'auto-reanudación pendiente':'usar RESTORE tras resolver'}` :
         (trip && trip.kind!=='home' ? ({
           'seller-return':'YENDO A LA HUNT',
           'exit-hunt':'SALIENDO DE LA HUNT HACIA SHANAR',
@@ -3243,6 +3371,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     const caveRouteModeInput = panel.querySelector("#minibia-bot-cave-route-mode");
     const caveModeratorPauseInput = panel.querySelector("#minibia-bot-cave-moderator-pause");
     const caveVerificationPauseInput = panel.querySelector("#minibia-bot-cave-verification-pause");
+    const caveVerificationAutoResumeInput=panel.querySelector('#minibia-bot-cave-verification-auto-resume');
     const caveVerificationTickInput = panel.querySelector("#minibia-bot-cave-verification-tick");
     const caveResumeVerificationButton = panel.querySelector("#minibia-bot-cave-resume-verification");
     const caveTestAlarmButton = panel.querySelector("#minibia-bot-cave-test-alarm");
@@ -3694,6 +3823,12 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
       });
     }
 
+    if(caveVerificationAutoResumeInput){
+      caveVerificationAutoResumeInput.checked=bot.cave?.config?.autoResumeAfterVerification!==false;
+      caveVerificationAutoResumeInput.addEventListener('change',()=>{
+        bot.cave.updateConfig({autoResumeAfterVerification:caveVerificationAutoResumeInput.checked});
+      });
+    }
     if (caveVerificationTickInput) {
       caveVerificationTickInput.value = String(bot.cave?.config?.verificationScanTickMs ?? 500);
       caveVerificationTickInput.addEventListener("change", () => {

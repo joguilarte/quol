@@ -4490,6 +4490,13 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     verificationLastPhase: null,
     verificationLastRestore: null,
     verificationLastRestoreAt: 0,
+    verificationUiSeenAt: 0,
+    verificationUiLastSeenAt: 0,
+    verificationUserSelections: 0,
+    verificationSuccessAt: 0,
+    verificationFailureAt: 0,
+    verificationAutoResumeReason: 'Esperando verificación',
+    verificationAutoRestoredAt: 0,
     lastRouteRejoinAt: 0,
     routeRejoinCount: 0,
     lastRouteRejoinReason: null,
@@ -4534,6 +4541,7 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
       travelFight: false,
       useWaypointTools: true, // rope and shovel for deliberate waypoint floor changes
       pauseWaypointsOnVerification: false, // opt-in, never pauses auto-attack or auto-heal
+      autoResumeAfterVerification: true, // only after positive completion or manual challenge interaction + dialog dismissal
       verificationScanTickMs: 500,
       pauseOnModeratorMessage: false,
       moderatorPauseMs: 30000,
@@ -4560,6 +4568,7 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
   config.travelFight = config.travelFight === true;
   config.useWaypointTools = config.useWaypointTools !== false;
   config.pauseWaypointsOnVerification = config.pauseWaypointsOnVerification === true;
+  config.autoResumeAfterVerification = config.autoResumeAfterVerification !== false;
   config.verificationScanTickMs = Math.max(200, Math.min(5000, Math.round(Number(config.verificationScanTickMs) || 500)));
   config.pauseOnModeratorMessage = config.pauseOnModeratorMessage === true;
   config.moderatorPauseMs = Math.max(20000, Math.min(120000, Number(config.moderatorPauseMs) || 30000));
@@ -6034,8 +6043,24 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
       const last = trip.phase === 'seller-return' && !trip.returnRoute ? trip.index + 1 :
         trip.phase === 'exit-hunt' ? (trip.index > (trip.huntWaypointIndex ?? 0) ? trip.index + 1 : trip.index - 1) : trip.index - 1;
       const point = active?.[last];
-      if (point && Number(point.z) === Number(position.z)) return normalizePosition(point);
-      return null;
+      // An inferred anchor from the wrong side of a stair can point to a
+      // different room or floor. Use it ONLY near the actual character.
+      const nearCurrent = (candidate) => candidate && Number(candidate.z) === Number(position.z) &&
+        Math.max(Math.abs(candidate.x-position.x),Math.abs(candidate.y-position.y)) <= 5;
+      if (nearCurrent(point)) return normalizePosition(point);
+      // Reverse seller traversal can skip an intermediate same-floor anchor
+      // after a rope/hole landing. Limit recovery to the active RECORDED corridor
+      // and require a single nearby point on the current floor.
+      const local = (active || []).map((p,i)=>({p,i}))
+        .filter(({p,i}) => Math.abs(i-trip.index) <= 3 && nearCurrent(p))
+        .sort((a,b)=>Math.max(Math.abs(a.p.x-position.x),Math.abs(a.p.y-position.y))-
+          Math.max(Math.abs(b.p.x-position.x),Math.abs(b.p.y-position.y)));
+      if (local.length === 1) return normalizePosition(local[0].p);
+      if (local.length > 1) {
+        const d=(p)=>Math.max(Math.abs(p.x-position.x),Math.abs(p.y-position.y));
+        if(d(local[0].p)<d(local[1].p)) return normalizePosition(local[0].p);
+      }
+      return null; // ambiguous or unrecorded: never guess a staircase
     }
     if (previous && previous.z === position?.z && waypoint?.z !== position.z)
       return previous;
@@ -6095,6 +6120,23 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
       // (or became unusable), but do not search arbitrary nearby staircases.
     }
 
+    // Saved seller presets may contain transitions learned in the OTHER direction.
+    // For this direction, use only an actual tile on our floor, near the
+    // recorded same-floor waypoint, and never infer an unmarked stair from art.
+    const tripTransitions = state.sellerTrip?.phase === 'seller-return'
+      ? [...(state.sellerTrip?.returnTransitions || []), ...(state.sellerTrip?.sellerTransitions || [])]
+      : (state.sellerTrip?.sellerTransitions || []);
+    const recordedLearned = tripTransitions.filter((t) =>
+      t?.from?.z === position.z && t?.to?.z === waypoint.z &&
+      recordedAnchor && Math.max(Math.abs(t.from.x-recordedAnchor.x),
+        Math.abs(t.from.y-recordedAnchor.y)) <= 3 &&
+      getTileAt(t.from) && isTransitionCandidateTile(getTileAt(t.from),waypoint,t.from));
+    if (recordedLearned.length === 1) {
+      const candidate=recordedLearned[0];
+      if(useFloorChangeTile({tile:getTileAt(candidate.from),position:candidate.from},waypoint,now)) {
+        state.lastRoutePathError=null;return true;
+      }
+    }
     const recordedTarget = findRecordedTransitionTile(recordedAnchor, waypoint);
     if (recordedTarget && useFloorChangeTile(recordedTarget, waypoint, now)) {
       state.lastRoutePathError = null;
@@ -6108,7 +6150,7 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
         ? `Transición ambigua: ${candidates.length} escaleras/agujeros visibles cerca de WP (${recordedAnchor.x},${recordedAnchor.y},${recordedAnchor.z}). Grabá WP junto a la correcta.`
         : candidates.length === 1
         ? `Escalera grabada localizada pero inaccesible desde la posición actual; revisar obstáculo y waypoint (${recordedAnchor.x},${recordedAnchor.y},${recordedAnchor.z}).`
-        : `Sin transición reconocible a 3 casillas del WP (${recordedAnchor.x},${recordedAnchor.y},${recordedAnchor.z}). Grabá un waypoint junto a la escalera.`;
+        : `Escalera no identificada por el cliente cerca de WP (${recordedAnchor.x},${recordedAnchor.y},${recordedAnchor.z}). Grabá WP sobre la entrada y otro tras cambiar de piso; no se cruzará a ciegas.`;
       warnBlockedFloorChange(waypoint, reason, now);
       return false;
     }
@@ -6278,6 +6320,7 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
   // a system verification. Only explicit countdowns or the active challenge UI.
   const verificationCountdownPattern = /(?:\b(?:60|30|15)\s*(?:seconds?|secs?|segundos?|segs?|s)\b[^\n]{0,70}\b(?:captcha|verification|verificaci[oó]n|anti[\s_-]*bot|bot[\s_-]*(?:test|check|challenge))\b|\b(?:captcha|verification|verificaci[oó]n|anti[\s_-]*bot|bot[\s_-]*(?:test|check|challenge))\b[^\n]{0,70}\b(?:60|30|15)\s*(?:seconds?|secs?|segundos?|segs?|s)\b)/i;
   const verificationActiveUiPattern = /(?:captcha|anti[\s_-]*bot|verificaci[oó]n|verify (?:you are|you're) human|toca el objeto que se ilumin[oó]|touch the (?:object|item) that (?:lit up|was illuminated))/i;
+  const verificationFailurePattern = /(?:captcha|verification|verificaci[oó]n|anti[\s_-]*bot)[^\n]{0,60}\b(?:failed|expired|timed out|incorrect|fall[oó]|venci[oó]|caduc[oó]|incorrecta)\b|\b(?:failed|expired|incorrect|fall[oó]|venci[oó])\b[^\n]{0,60}(?:captcha|verification|verificaci[oó]n)/i;
 
   function enqueueTrustedVerificationNotice(text, source, channel='Console', sender='Sistema') {
     const plain=String(text||'').replace(/<[^>]*>/g,' ').replace(/\s+/g,' ').trim();
@@ -6306,7 +6349,17 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     const wrapper=function(message, ...args) {
       const result=original.call(this,message,...args);
       if (config.pauseWaypointsOnVerification) {
-        enqueueTrustedVerificationNotice(message, 'Console (sistema)', 'Console', 'Sistema');
+        const plain=String(message||'').replace(/<[^>]*>/g,' ').trim();
+        if (state.pausedForVerification && verificationCompletePattern.test(plain)) {
+          state.verificationSuccessAt=Date.now();
+          state.verificationAutoResumeReason='Sistema confirmó el desafío; comprobando cierre';
+          bot.log('verification completion confirmed by system');
+        } else if (state.pausedForVerification && verificationFailurePattern.test(plain)) {
+          state.verificationFailureAt=Date.now();
+          state.verificationAutoResumeReason='Desafío fallido o vencido: requiere revisión manual';
+        } else {
+          enqueueTrustedVerificationNotice(message, 'Console (sistema)', 'Console', 'Sistema');
+        }
       }
       return result;
     };
@@ -6319,24 +6372,89 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     state.verificationBoundConsole=null;
   });
 
-  // Only inspect an actual visible dedicated challenge dialog. We do not
-  // search all DOM text: that previously matched chat transcript text.
-  function getVisibleChallengeDialogNotices() {
+  // Recognize only a visible, dedicated challenge UI. Never search the whole
+  // page for "bot" or "captcha"; chat messages are not challenge dialogs.
+  const verificationUiSelector = [
+    '#captcha-modal','#verification-modal','[data-testid="captcha-modal"]',
+    '[data-testid="verification-modal"]','[class~="captcha-modal"]',
+    '[class~="verification-modal"]','[id*="anti-bot"]','[class*="anti-bot"]',
+    '[id*="antibot"]','[class*="antibot"]','[role="dialog"]','[aria-modal="true"]'
+  ].join(',');
+  function getVisibleChallengeNodes() {
     if (!document.body) return [];
     const out=[];
-    for (const node of document.querySelectorAll(
-      '#captcha-modal, #verification-modal, [data-testid="captcha-modal"], '+
-      '[data-testid="verification-modal"], [class~="captcha-modal"], '+
-      '[class~="verification-modal"], [id^="captcha-"], [id^="verification-"]')) {
+    for (const node of document.querySelectorAll(verificationUiSelector)) {
       if (node.closest('#minibia-bot-panel') || node.closest('#server-message, #notification')) continue;
       if (node.closest('[hidden], [aria-hidden="true"]') || node.getClientRects?.().length===0) continue;
       const text=String(node.textContent||'').replace(/\s+/g,' ').trim();
-      if (!text || text.length>350 || !verificationActiveUiPattern.test(text)) continue;
+      if (!text || text.length>950 || !verificationActiveUiPattern.test(text)) continue;
+      // Require an identifiable verification dialog, not an incidental mention.
+      if (!/(?:verificaci[oó]n\s+anti[\s-]*bot|anti[\s-]*bot\s+(?:verification|check)|observa c[oó]mo se iluminan|repeat the order|repite el orden|captcha)/i.test(text)) continue;
+      if (out.some(parent=>parent.contains(node))) continue;
+      out.push(node);
+    }
+    return out;
+  }
+  function getVisibleChallengeDialogNotices(nodes=getVisibleChallengeNodes()) {
+    const out=[];
+    for (const node of nodes) {
+      const text=String(node.textContent||'').replace(/\s+/g,' ').trim();
       if (state.verificationDomSeen.get(node)===text) continue;
       state.verificationDomSeen.set(node,text);
       out.push({text:text.slice(0,160),source:'Ventana de verificación',channel:'Interfaz',sender:'Sistema',at:Date.now()});
     }
     return out;
+  }
+  // Count manual interactions with the challenge choices, not clicks on the
+  // postpone/close controls. Closing the dialog alone must never auto-resume.
+  function trackManualChallengeChoice(event) {
+    if (!state.pausedForVerification || !config.autoResumeAfterVerification) return;
+    const target=event?.target;
+    if (!target || !getVisibleChallengeNodes().some(n=>n.contains(target))) return;
+    const control=target.closest?.('button,[role="button"],a,input');
+    const desc=String(control?.textContent||control?.getAttribute?.('aria-label')||'').trim();
+    if (/aplazar|postpone|snooze|skip|cerrar|close|cancel|\b[x×]\b/i.test(desc)) return;
+    state.verificationUserSelections++;
+  }
+  document.addEventListener('pointerdown',trackManualChallengeChoice,true);
+  bot.addCleanup?.(()=>document.removeEventListener('pointerdown',trackManualChallengeChoice,true));
+
+  function attemptAutomaticVerificationResume(now,visibleNodes) {
+    if (!state.pausedForVerification || !config.autoResumeAfterVerification) return;
+    if (visibleNodes.length) {
+      state.verificationUiSeenAt ||= now;
+      state.verificationUiLastSeenAt=now;
+      state.verificationAutoResumeReason='CAPTCHA visible: esperando resolución manual';
+      return;
+    }
+    if (state.verificationFailureAt && state.verificationFailureAt >= state.verificationUiSeenAt) return;
+    const confirmedBySystem=state.verificationSuccessAt>0;
+    const completedUiManually=state.verificationUiSeenAt>0 &&
+      state.verificationUserSelections>=3 && state.verificationUiLastSeenAt>0 &&
+      now-state.verificationUiLastSeenAt>=5000 &&
+      now-state.verificationUiSeenAt<5*60*1000;
+    if (!confirmedBySystem && !completedUiManually) {
+      state.verificationAutoResumeReason=state.verificationUiSeenAt
+        ? 'Esperando fin del diálogo y secuencia manual válida'
+        : 'Esperando confirmación del sistema o diálogo de CAPTCHA';
+      return;
+    }
+    // A genuine completion event can clear a challenge without a UI ever
+    // appearing. A normal countdown is NOT a success acknowledgement.
+    if (confirmedBySystem && now-state.verificationSuccessAt<2000) return;
+    if (state.verificationUiLastSeenAt && now-state.verificationUiLastSeenAt<5000) return;
+    if (bot.emergencyState?.()?.halted || state.pausedForModeratorUntil>Date.now()) {
+      state.verificationAutoResumeReason='Otra protección activa; no se reanuda';
+      return;
+    }
+    state.verificationAutoResumeReason=confirmedBySystem
+      ? 'Verificación completada según el servidor'
+      : 'Secuencia manual completada y diálogo cerrado';
+    const why=state.verificationAutoResumeReason;
+    const result=resumeAfterVerification();
+    state.verificationAutoResumeReason=result.ok ? `Restaurado automáticamente: ${why}` : `Restauración parcial: ${result.reason}`;
+    if(result.ok)state.verificationAutoRestoredAt=now;
+    bot.log('verification automatic restore', {why,...result});
   }
 
   function scanVerificationNotice() {
@@ -6347,11 +6465,17 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
         bot.attack?.setMovementHold?.('verification',true);
         if (state.running) cancelOwnWaypointWalk();
       }
-      const notices=state.verificationPendingNotices.splice(0).concat(getVisibleChallengeDialogNotices());
+      const challengeNodes=getVisibleChallengeNodes();
+      const notices=state.verificationPendingNotices.splice(0).concat(getVisibleChallengeDialogNotices(challengeNodes));
       for (const notice of notices) {
         if (!state.pausedForVerification) {
           saveVerificationSnapshot();
           state.pausedForVerification=true;
+          state.verificationUiSeenAt=0;
+          state.verificationUiLastSeenAt=0;
+          state.verificationUserSelections=0;
+          state.verificationSuccessAt=0;
+          state.verificationFailureAt=0;
           cancelOwnWaypointWalk();
           bot.attack?.setMovementHold?.('verification',true);
           bot.safeNavigation?.cancel?.('attack');
@@ -6372,6 +6496,7 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
           bot.log('verification warning confirmed', {phase,source:notice.source,channel:notice.channel,sender:notice.sender});
         }
       }
+      attemptAutomaticVerificationResume(Date.now(),challengeNodes);
     } catch(error) { bot.log('verification notice check failed',error?.message||error); }
   }
 
@@ -6534,6 +6659,11 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     state.lastVerificationSender = null;
     state.verificationLastPhase = null;
     state.verificationAlarmedStages.clear();
+    state.verificationUiSeenAt=0;
+    state.verificationUiLastSeenAt=0;
+    state.verificationUserSelections=0;
+    state.verificationSuccessAt=0;
+    state.verificationFailureAt=0;
     state.lastPathAt = 0;
     state.needsRouteRejoinCheck = true;
     bot.attack?.setMovementHold?.('verification', false);
@@ -7561,6 +7691,14 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
       expectedFloor: state.expectedFloor,
       pausedForFloorMove: state.pausedForFloorMove,
       pausedForVerification: state.pausedForVerification && config.pauseWaypointsOnVerification,
+      verificationAutoResume: {
+        enabled:config.autoResumeAfterVerification,
+        uiDetected:state.verificationUiSeenAt>0,
+        selections:state.verificationUserSelections,
+        serverConfirmed:state.verificationSuccessAt>0,
+        reason:state.verificationAutoResumeReason,
+        restoredAt:state.verificationAutoRestoredAt
+      },
       lastVerificationNotice: state.lastVerificationNotice,
       lastVerificationSource: state.lastVerificationSource,
       lastVerificationChannel: state.lastVerificationChannel,
@@ -7605,6 +7743,7 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     config.travelFight = config.travelFight === true;
     config.useWaypointTools = config.useWaypointTools !== false;
     config.pauseWaypointsOnVerification = config.pauseWaypointsOnVerification === true;
+  config.autoResumeAfterVerification = config.autoResumeAfterVerification !== false;
     config.verificationScanTickMs = Math.max(200, Math.min(5000, Math.round(Number(config.verificationScanTickMs) || 500)));
     config.pauseOnModeratorMessage = config.pauseOnModeratorMessage === true;
     config.moderatorPauseMs = Math.max(20000, Math.min(120000, Number(config.moderatorPauseMs) || 30000));
@@ -7711,7 +7850,6 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     isAtWaypoint,
   };
 };
-
 
 window.__minibiaBotBundle.installEquipRingModule = function installEquipRingModule(bot) {
   const configStorageKey = "minibiaBot.equipRing.config";
@@ -11611,6 +11749,47 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
         #minibia-bot-panel .mb-essential-seller-fields {grid-template-columns:1fr!important;}
       }
     `;
+    style.textContent += `
+      /* Final: real adaptive columns based on panel width, not viewport width. */
+      #minibia-bot-panel .mb-quick-tools {
+        display:block!important;column-count:1!important;column-gap:10px!important;
+      }
+      #minibia-bot-panel .mb-quick-tools>.mb-quick-group {
+        display:inline-block!important;vertical-align:top!important;width:100%!important;
+        margin:0 0 9px!important;box-sizing:border-box!important;break-inside:avoid!important;
+        height:auto!important;min-height:0!important;
+      }
+      #minibia-bot-panel .mb-quick-routes {grid-template-columns:1fr!important;}
+      #minibia-bot-panel .mb-main-cave-section>.mb-stack {grid-template-columns:1fr!important;align-items:start!important;}
+      @container (min-width:920px) {
+        #minibia-bot-panel .mb-quick-tools {column-count:2!important;}
+        #minibia-bot-panel .mb-quick-routes {grid-template-columns:repeat(2,minmax(0,1fr))!important;}
+        #minibia-bot-panel .mb-main-cave-section>.mb-stack {grid-template-columns:repeat(2,minmax(0,1fr))!important;}
+      }
+      @container (min-width:1420px) {
+        #minibia-bot-panel .mb-quick-tools {column-count:3!important;}
+        #minibia-bot-panel .mb-quick-routes {grid-template-columns:repeat(3,minmax(0,1fr))!important;}
+        #minibia-bot-panel .mb-main-cave-section>.mb-stack {grid-template-columns:repeat(3,minmax(0,1fr))!important;}
+      }
+      #minibia-bot-panel .mb-main-cave-section>.mb-stack>.mb-cave-card {height:auto!important;align-self:start!important;}
+      #minibia-bot-panel .mb-quick-profiles {
+        display:flex;flex-wrap:wrap;gap:7px;align-items:center;border:1px solid rgba(224,200,148,.24);
+        border-radius:7px;padding:7px 9px;max-width:100%;box-sizing:border-box;
+      }
+      #minibia-bot-panel .mb-quick-profiles select {min-width:150px;max-width:240px;flex:1 1 150px;}
+      #minibia-bot-panel .mb-quick-profiles button {width:auto!important;padding:5px 10px!important;}
+      #minibia-bot-panel .mb-quick-profiles small {font-size:11px;color:#d6c18f;}
+      #minibia-bot-emergency-stop {
+        width:124px!important;height:44px!important;border-radius:14px!important;
+        border:1px solid rgba(255,255,255,.55)!important;
+        box-shadow:0 4px 16px rgba(0,0,0,.68)!important;
+        font:700 12px Verdana,sans-serif!important;letter-spacing:.35px!important;
+        opacity:.94!important;touch-action:none;
+      }
+      #minibia-bot-emergency-stop[data-mode='start'] {background:#276042!important;}
+      #minibia-bot-emergency-stop[data-mode='resume'] {background:#276042!important;}
+      #minibia-bot-emergency-stop[data-mode='stop'] {background:#a62525!important;}
+    `;
     document.head.appendChild(style);
 
     const panel = document.createElement("div");
@@ -11935,6 +12114,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
                 <input type="checkbox" id="minibia-bot-cave-verification-pause" />
                 <span>Pause waypoints on anti-bot notice</span>
               </label>
+              <label class="mb-toggle"><input type="checkbox" id="minibia-bot-cave-verification-auto-resume"/><span>Reanudar automáticamente al completar el CAPTCHA</span></label>
               <label class="mb-field" for="minibia-bot-cave-verification-tick">
                 <span class="mb-field-label">Notice scan tick (ms, 200-5000)</span>
                 <input type="number" id="minibia-bot-cave-verification-tick" min="200" max="5000" step="100" value="500" />
@@ -11943,7 +12123,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
                 <button type="button" class="mb-small-button" id="minibia-bot-cave-test-alarm">Test Loud Alarm</button>
                 <button type="button" class="mb-small-button" id="minibia-bot-cave-resume-verification">RESTORE AFTER CAPTCHA</button>
               </div>
-              <div class="mb-small-note">Alarms at 60, 30 and 15 second warnings (once per phase). Navigation/chase stop; Attack keeps targeting without following, and Heal remains on if previously enabled. After resolving the challenge, RESTORE re-enables only previously running modules. This does not complete CAPTCHA.</div>
+              <div class="mb-small-note">Alarma 60/30/15s, ataque estacionario y Auto Heal. Auto-reanudar solo tras confirmación del servidor o cierre del desafío después de una secuencia manual válida; el botón RESTORE sigue disponible. No resuelve el CAPTCHA.</div>
               <div class="mb-actions mb-actions-inline-two">
                 <button type="button" class="mb-small-button" id="minibia-bot-cave-start">Start</button>
                 <button type="button" class="mb-small-button" id="minibia-bot-cave-stop">Stop</button>
@@ -12501,6 +12681,74 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     if(previousCaption)previousCaption.textContent='Activá lo necesario y presioná START HUNT';
     if(quickBar.querySelector('#minibia-bot-quick-resume-notice'))
       quickBar.querySelector('#minibia-bot-quick-resume-notice').textContent='REANUDAR TRAS CAPTCHA';
+    // Named Quick profiles: save the existing module configurations. Routes
+    // remain Cave presets; never snapshot credentials or the current session.
+    const quickProfilesKey='minibiaBot.ui.quickProfiles.v1';
+    const profileRow=document.createElement('div');
+    profileRow.className='mb-quick-profiles';
+    profileRow.innerHTML='<strong>Mi configuración</strong><select id="minibia-bot-profile-list" aria-label="Configuración guardada"></select><button type="button" id="minibia-bot-profile-save">GUARDAR</button><button type="button" id="minibia-bot-profile-apply">APLICAR</button><small id="minibia-bot-profile-msg" aria-live="polite">Persistente en este navegador</small>';
+    const profileInsert=quickBar.querySelector('.mb-quick-routes') || quickBar.querySelector('.mb-quick-head');
+    if(profileInsert) profileInsert.before(profileRow);
+    const profileSelect=profileRow.querySelector('#minibia-bot-profile-list');
+    const profileMsg=profileRow.querySelector('#minibia-bot-profile-msg');
+    const profileModules=['cave','attack','heal','rune','talk','panic','eat','invisible','magicShield','equipRing','floorMove','corpseLoot','autoSell'];
+    const safeConfig=(name)=>{
+      const src=bot[name]?.status?.()?.config || bot[name]?.config || {};
+      return Object.fromEntries(Object.entries(src).filter(([k,v])=>
+        !/(?:key|token|secret|password|credential)/i.test(k) &&
+        ['string','number','boolean'].includes(typeof v) ||
+        (Array.isArray(v) && !/(?:key|token|secret|password|credential)/i.test(k))));
+    };
+    const readProfiles=()=>{
+      const data=bot.storage.get(quickProfilesKey,{});
+      return data && typeof data==='object' && !Array.isArray(data) ? data : {};
+    };
+    function renderProfiles(want){
+      const data=readProfiles();profileSelect.replaceChildren();
+      for(const name of Object.keys(data).sort()){
+        const opt=document.createElement('option');opt.value=name;opt.textContent=name;profileSelect.append(opt);
+      }
+      if(want && data[want])profileSelect.value=want;
+      if(!profileSelect.options.length){const opt=document.createElement('option');opt.value='';opt.textContent='Sin perfiles';profileSelect.append(opt);}
+    }
+    renderProfiles();
+    profileRow.querySelector('#minibia-bot-profile-save').addEventListener('click',()=>{
+      const defaultName=profileSelect.value || 'Mi Hunt';
+      const name=String(window.prompt('Nombre de configuración:',defaultName)||'').trim().slice(0,48);
+      if(!name)return;
+      const profiles=readProfiles();
+      const modules={};for(const moduleName of profileModules){modules[moduleName]=safeConfig(moduleName);}
+      profiles[name]={version:1,createdAt:Date.now(),modules,
+        huntPreset:bot.cave?.getActivePresetName?.()||null};
+      bot.storage.set(quickProfilesKey,profiles);renderProfiles(name);
+      profileMsg.textContent='Guardado: '+name+' · sin API key';
+    });
+    profileRow.querySelector('#minibia-bot-profile-apply').addEventListener('click',()=>{
+      const name=profileSelect.value;const profile=readProfiles()[name];if(!profile?.modules)return;
+      // Apply with modules OFF to avoid movement/attack triggered by a profile
+      // switch. START HUNT is the explicit action to begin the route.
+      if(bot.cave?.status?.()?.running){profileMsg.textContent='Detené la hunt antes de aplicar otro perfil';return;}
+      const failure=[];
+      try {if(profile.huntPreset)bot.cave?.loadPreset?.(profile.huntPreset);} catch(e){failure.push('ruta');}
+      for(const moduleName of profileModules){
+        if(!profile.modules[moduleName] || typeof bot[moduleName]?.updateConfig!=='function')continue;
+        try {
+          const next={...profile.modules[moduleName]};
+          delete next.apiKey;
+          bot[moduleName].updateConfig(next);
+        }catch(e){failure.push(moduleName);}
+      }
+      // Reinject just the view so all current controls use the ORIGINAL
+      // status/refresh handlers, never duplicates. This is not a full reload.
+      profileMsg.textContent=failure.length?'Revisar: '+failure.join(', '):'Aplicado: '+name+' · pulsá START HUNT';
+      if(!failure.length){
+        for(const fn of ['refreshAutoHealStatus','refreshRuneStatus','refreshAutoAttackStatus',
+          'refreshCaveStatus','refreshCavePresetControls','refreshTalkStatus','refreshPanicStatus']){
+          try {bot.ui?.[fn]?.();}catch(_){}
+        }
+        refreshQuickSummary?.();
+      }
+    });
     // No nested disclosure menus: all functional sections stay in this one window.
     const emergencyButton = document.createElement("button");
     emergencyButton.id = "minibia-bot-emergency-stop";
@@ -12514,21 +12762,38 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     function refreshEmergencyButton() {
       const emergency=bot.emergencyState?.()||{};
       const halted=!!emergency.halted;
+      const movementActive=bot.cave?.status?.()?.running===true;
+      const otherActive=['attack','rune','heal','talk'].some(k=>bot[k]?.status?.()?.running===true);
+      const state=halted ? 'resume' : (movementActive||otherActive ? 'stop':'start');
+      emergencyButton.dataset.mode=state;
       emergencyButton.dataset.halted=String(halted);
-      emergencyButton.textContent=halted ? '▶' : '■';
-      emergencyButton.setAttribute('aria-label',halted ?
-        (emergency.canResume ? 'RESUME previous modules (Ctrl+Shift+X)' : 'Stopped: reload lost resume snapshot; use Quick Hunt') :
-        'EMERGENCY STOP (Ctrl+Shift+X)');
-      emergencyButton.title=halted ? (emergency.canResume ? 'RESUME ONLY previously active modules · Ctrl+Shift+X' :
-        'Manual restart needed; snapshot not available after reload') : 'STOP ALL · Ctrl+Shift+X · Drag to reposition';
+      emergencyButton.textContent=state==='stop'?'■ PAUSAR':state==='resume'?'▶ REANUDAR':'▶ INICIAR';
+      emergencyButton.title=state==='stop'?'PAUSAR todo y guardar estado · Ctrl+Shift+X':
+        state==='resume'?(emergency.canResume?'RESTAURAR módulos previos':'Sin sesión guardada: iniciar ruta manualmente'):
+        'Iniciar Hunt con la ruta guardada · Ctrl+Shift+X siempre detiene';
+      emergencyButton.setAttribute('aria-label',emergencyButton.title);
     }
-    function triggerEmergencyStop() {
-      if (bot.emergencyState?.().halted) {
-        if (!bot.emergencyResume?.()) console.warn('[minibia-bot] emergency resume incomplete/unavailable');
-      } else bot.emergencyStop?.();
+    function triggerEmergencyStop(fromHotkey=false) {
+      const emergency=bot.emergencyState?.()||{};
+      if(emergency.halted){
+        if(emergency.canResume){
+          if(!bot.emergencyResume?.()) console.warn('[minibia-bot] restore incomplete: check Essentials');
+        }else{
+          // Recovered tab with no live snapshot. An explicit click STARTS the
+          // configured hunt; it must NEVER silently resume on page reload.
+          bot.emergencyDismiss?.();
+          if(!bot.cave?.startHuntCycle?.()?.ok) console.warn('[minibia-bot] HUNT could not start; inspect Essentials');
+        }
+      } else if(fromHotkey || bot.cave?.status?.()?.running ||
+          ['attack','rune','heal','talk'].some(k=>bot[k]?.status?.()?.running===true)) {
+        bot.emergencyStop?.();
+      } else {
+        const started=bot.cave?.startHuntCycle?.();
+        if(!started?.ok)console.warn('[minibia-bot] HUNT could not start',started);
+      }
       refreshEmergencyButton();
     }
-    const emergencyDiameter = 44;
+    const emergencyDiameter = 124;
     const clampEmergency = (x, y) => ({
       left: Math.max(0, Math.min(Math.max(0, window.innerWidth - emergencyDiameter), x)),
       top: Math.max(0, Math.min(Math.max(0, window.innerHeight - emergencyDiameter), y)),
@@ -12587,11 +12852,11 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
       event.preventDefault();
       event.stopImmediatePropagation();
       if (emergencyDragged) { emergencyDragged = false; return; }
-      triggerEmergencyStop();
+      triggerEmergencyStop(false);
     });
     const emergencyHotkey = (event) => {
       if (event.ctrlKey && event.shiftKey && event.code === "KeyX" && !event.repeat) {
-        event.preventDefault(); event.stopImmediatePropagation(); triggerEmergencyStop();
+        event.preventDefault(); event.stopImmediatePropagation(); triggerEmergencyStop(true);
       }
     };
     const repositionEmergencyOnResize = () => {
@@ -12739,6 +13004,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
       mirror('minibia-bot-cave-route-mode',caveConfig.routeTraversalMode||'pingpong');
       mirror('minibia-bot-cave-moderator-pause',caveConfig.pauseOnModeratorMessage===true);
       mirror('minibia-bot-cave-verification-pause',caveConfig.pauseWaypointsOnVerification===true);
+      mirror('minibia-bot-cave-verification-auto-resume',caveConfig.autoResumeAfterVerification!==false);
       mirror('minibia-bot-panic-unknown-alarm',bot.panic?.config?.unknownPlayerSoundAlertEnabled===true);
       mirror('minibia-bot-panic-smart-chat',bot.panic?.config?.smartChatAlertEnabled===true);
       mirror('minibia-bot-cave-limit-chase',caveConfig.limitChaseToRoute===true);
@@ -12827,7 +13093,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
       if (!holdLabel) return;
       const reasons=[];
       if (em.halted) reasons.push('EMERGENCY STOP: usar botón de recuperación');
-      if (c.pausedForVerification) reasons.push(`Verificación detectada en ${c.lastVerificationSource||'origen desconocido'}: resolver y pulsar RESTORE CAPTCHA`);
+      if (c.pausedForVerification) reasons.push(`CAPTCHA: ${c.verificationAutoResume?.reason||'esperando resolución'}; ${c.verificationAutoResume?.enabled?'autorreanudar activado':'RESTORE manual'}`);
       if (c.moderatorPaused) reasons.push(`GM: pausa temporal (${Math.ceil((c.moderatorPauseRemainingMs||0)/1000)} s)`);
       if (p.pendingReturn) reasons.push('Panic Runner: retorno pendiente');
       if (c.lastRoutePathError && c.lastRoutePathErrorAt && Date.now()-c.lastRoutePathErrorAt<90000)
@@ -12880,7 +13146,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
       quickStatus.textContent=em?.halted ? (em.canResume ? 'Emergency paused. Use ▶ to resume previous modules.' : 'Emergency paused; reload cleared resume snapshot.') :
         (trip?.kind==='home' ? (trip.phase==='waiting-at-home'?'At HOME — choose GO HUNT to return':'Home travel: '+trip.phase) :
         (caveStatus.moderatorPaused ? 'GM ALERT: standing still; attack in place; alarm sounded' :
-        caveStatus.pausedForVerification ? `CAPTCHA ALERT ${caveStatus.verificationLastPhase||''}: stationary attack, press RESTORE after solving` :
+        caveStatus.pausedForVerification ? `CAPTCHA ${caveStatus.verificationLastPhase||''}: ataque quieto; ${caveStatus.verificationAutoResume?.enabled?'auto-reanudación pendiente':'usar RESTORE tras resolver'}` :
         (trip && trip.kind!=='home' ? ({
           'seller-return':'YENDO A LA HUNT',
           'exit-hunt':'SALIENDO DE LA HUNT HACIA SHANAR',
@@ -13279,6 +13545,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     const caveRouteModeInput = panel.querySelector("#minibia-bot-cave-route-mode");
     const caveModeratorPauseInput = panel.querySelector("#minibia-bot-cave-moderator-pause");
     const caveVerificationPauseInput = panel.querySelector("#minibia-bot-cave-verification-pause");
+    const caveVerificationAutoResumeInput=panel.querySelector('#minibia-bot-cave-verification-auto-resume');
     const caveVerificationTickInput = panel.querySelector("#minibia-bot-cave-verification-tick");
     const caveResumeVerificationButton = panel.querySelector("#minibia-bot-cave-resume-verification");
     const caveTestAlarmButton = panel.querySelector("#minibia-bot-cave-test-alarm");
@@ -13730,6 +13997,12 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
       });
     }
 
+    if(caveVerificationAutoResumeInput){
+      caveVerificationAutoResumeInput.checked=bot.cave?.config?.autoResumeAfterVerification!==false;
+      caveVerificationAutoResumeInput.addEventListener('change',()=>{
+        bot.cave.updateConfig({autoResumeAfterVerification:caveVerificationAutoResumeInput.checked});
+      });
+    }
     if (caveVerificationTickInput) {
       caveVerificationTickInput.value = String(bot.cave?.config?.verificationScanTickMs ?? 500);
       caveVerificationTickInput.addEventListener("change", () => {
@@ -14271,6 +14544,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     },
   };
 };
+
 
 
 (() => {

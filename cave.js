@@ -61,6 +61,13 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     verificationLastPhase: null,
     verificationLastRestore: null,
     verificationLastRestoreAt: 0,
+    verificationUiSeenAt: 0,
+    verificationUiLastSeenAt: 0,
+    verificationUserSelections: 0,
+    verificationSuccessAt: 0,
+    verificationFailureAt: 0,
+    verificationAutoResumeReason: 'Esperando verificación',
+    verificationAutoRestoredAt: 0,
     lastRouteRejoinAt: 0,
     routeRejoinCount: 0,
     lastRouteRejoinReason: null,
@@ -105,6 +112,7 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
       travelFight: false,
       useWaypointTools: true, // rope and shovel for deliberate waypoint floor changes
       pauseWaypointsOnVerification: false, // opt-in, never pauses auto-attack or auto-heal
+      autoResumeAfterVerification: true, // only after positive completion or manual challenge interaction + dialog dismissal
       verificationScanTickMs: 500,
       pauseOnModeratorMessage: false,
       moderatorPauseMs: 30000,
@@ -131,6 +139,7 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
   config.travelFight = config.travelFight === true;
   config.useWaypointTools = config.useWaypointTools !== false;
   config.pauseWaypointsOnVerification = config.pauseWaypointsOnVerification === true;
+  config.autoResumeAfterVerification = config.autoResumeAfterVerification !== false;
   config.verificationScanTickMs = Math.max(200, Math.min(5000, Math.round(Number(config.verificationScanTickMs) || 500)));
   config.pauseOnModeratorMessage = config.pauseOnModeratorMessage === true;
   config.moderatorPauseMs = Math.max(20000, Math.min(120000, Number(config.moderatorPauseMs) || 30000));
@@ -1605,8 +1614,24 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
       const last = trip.phase === 'seller-return' && !trip.returnRoute ? trip.index + 1 :
         trip.phase === 'exit-hunt' ? (trip.index > (trip.huntWaypointIndex ?? 0) ? trip.index + 1 : trip.index - 1) : trip.index - 1;
       const point = active?.[last];
-      if (point && Number(point.z) === Number(position.z)) return normalizePosition(point);
-      return null;
+      // An inferred anchor from the wrong side of a stair can point to a
+      // different room or floor. Use it ONLY near the actual character.
+      const nearCurrent = (candidate) => candidate && Number(candidate.z) === Number(position.z) &&
+        Math.max(Math.abs(candidate.x-position.x),Math.abs(candidate.y-position.y)) <= 5;
+      if (nearCurrent(point)) return normalizePosition(point);
+      // Reverse seller traversal can skip an intermediate same-floor anchor
+      // after a rope/hole landing. Limit recovery to the active RECORDED corridor
+      // and require a single nearby point on the current floor.
+      const local = (active || []).map((p,i)=>({p,i}))
+        .filter(({p,i}) => Math.abs(i-trip.index) <= 3 && nearCurrent(p))
+        .sort((a,b)=>Math.max(Math.abs(a.p.x-position.x),Math.abs(a.p.y-position.y))-
+          Math.max(Math.abs(b.p.x-position.x),Math.abs(b.p.y-position.y)));
+      if (local.length === 1) return normalizePosition(local[0].p);
+      if (local.length > 1) {
+        const d=(p)=>Math.max(Math.abs(p.x-position.x),Math.abs(p.y-position.y));
+        if(d(local[0].p)<d(local[1].p)) return normalizePosition(local[0].p);
+      }
+      return null; // ambiguous or unrecorded: never guess a staircase
     }
     if (previous && previous.z === position?.z && waypoint?.z !== position.z)
       return previous;
@@ -1666,6 +1691,23 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
       // (or became unusable), but do not search arbitrary nearby staircases.
     }
 
+    // Saved seller presets may contain transitions learned in the OTHER direction.
+    // For this direction, use only an actual tile on our floor, near the
+    // recorded same-floor waypoint, and never infer an unmarked stair from art.
+    const tripTransitions = state.sellerTrip?.phase === 'seller-return'
+      ? [...(state.sellerTrip?.returnTransitions || []), ...(state.sellerTrip?.sellerTransitions || [])]
+      : (state.sellerTrip?.sellerTransitions || []);
+    const recordedLearned = tripTransitions.filter((t) =>
+      t?.from?.z === position.z && t?.to?.z === waypoint.z &&
+      recordedAnchor && Math.max(Math.abs(t.from.x-recordedAnchor.x),
+        Math.abs(t.from.y-recordedAnchor.y)) <= 3 &&
+      getTileAt(t.from) && isTransitionCandidateTile(getTileAt(t.from),waypoint,t.from));
+    if (recordedLearned.length === 1) {
+      const candidate=recordedLearned[0];
+      if(useFloorChangeTile({tile:getTileAt(candidate.from),position:candidate.from},waypoint,now)) {
+        state.lastRoutePathError=null;return true;
+      }
+    }
     const recordedTarget = findRecordedTransitionTile(recordedAnchor, waypoint);
     if (recordedTarget && useFloorChangeTile(recordedTarget, waypoint, now)) {
       state.lastRoutePathError = null;
@@ -1679,7 +1721,7 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
         ? `Transición ambigua: ${candidates.length} escaleras/agujeros visibles cerca de WP (${recordedAnchor.x},${recordedAnchor.y},${recordedAnchor.z}). Grabá WP junto a la correcta.`
         : candidates.length === 1
         ? `Escalera grabada localizada pero inaccesible desde la posición actual; revisar obstáculo y waypoint (${recordedAnchor.x},${recordedAnchor.y},${recordedAnchor.z}).`
-        : `Sin transición reconocible a 3 casillas del WP (${recordedAnchor.x},${recordedAnchor.y},${recordedAnchor.z}). Grabá un waypoint junto a la escalera.`;
+        : `Escalera no identificada por el cliente cerca de WP (${recordedAnchor.x},${recordedAnchor.y},${recordedAnchor.z}). Grabá WP sobre la entrada y otro tras cambiar de piso; no se cruzará a ciegas.`;
       warnBlockedFloorChange(waypoint, reason, now);
       return false;
     }
@@ -1849,6 +1891,7 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
   // a system verification. Only explicit countdowns or the active challenge UI.
   const verificationCountdownPattern = /(?:\b(?:60|30|15)\s*(?:seconds?|secs?|segundos?|segs?|s)\b[^\n]{0,70}\b(?:captcha|verification|verificaci[oó]n|anti[\s_-]*bot|bot[\s_-]*(?:test|check|challenge))\b|\b(?:captcha|verification|verificaci[oó]n|anti[\s_-]*bot|bot[\s_-]*(?:test|check|challenge))\b[^\n]{0,70}\b(?:60|30|15)\s*(?:seconds?|secs?|segundos?|segs?|s)\b)/i;
   const verificationActiveUiPattern = /(?:captcha|anti[\s_-]*bot|verificaci[oó]n|verify (?:you are|you're) human|toca el objeto que se ilumin[oó]|touch the (?:object|item) that (?:lit up|was illuminated))/i;
+  const verificationFailurePattern = /(?:captcha|verification|verificaci[oó]n|anti[\s_-]*bot)[^\n]{0,60}\b(?:failed|expired|timed out|incorrect|fall[oó]|venci[oó]|caduc[oó]|incorrecta)\b|\b(?:failed|expired|incorrect|fall[oó]|venci[oó])\b[^\n]{0,60}(?:captcha|verification|verificaci[oó]n)/i;
 
   function enqueueTrustedVerificationNotice(text, source, channel='Console', sender='Sistema') {
     const plain=String(text||'').replace(/<[^>]*>/g,' ').replace(/\s+/g,' ').trim();
@@ -1877,7 +1920,17 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     const wrapper=function(message, ...args) {
       const result=original.call(this,message,...args);
       if (config.pauseWaypointsOnVerification) {
-        enqueueTrustedVerificationNotice(message, 'Console (sistema)', 'Console', 'Sistema');
+        const plain=String(message||'').replace(/<[^>]*>/g,' ').trim();
+        if (state.pausedForVerification && verificationCompletePattern.test(plain)) {
+          state.verificationSuccessAt=Date.now();
+          state.verificationAutoResumeReason='Sistema confirmó el desafío; comprobando cierre';
+          bot.log('verification completion confirmed by system');
+        } else if (state.pausedForVerification && verificationFailurePattern.test(plain)) {
+          state.verificationFailureAt=Date.now();
+          state.verificationAutoResumeReason='Desafío fallido o vencido: requiere revisión manual';
+        } else {
+          enqueueTrustedVerificationNotice(message, 'Console (sistema)', 'Console', 'Sistema');
+        }
       }
       return result;
     };
@@ -1890,24 +1943,89 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     state.verificationBoundConsole=null;
   });
 
-  // Only inspect an actual visible dedicated challenge dialog. We do not
-  // search all DOM text: that previously matched chat transcript text.
-  function getVisibleChallengeDialogNotices() {
+  // Recognize only a visible, dedicated challenge UI. Never search the whole
+  // page for "bot" or "captcha"; chat messages are not challenge dialogs.
+  const verificationUiSelector = [
+    '#captcha-modal','#verification-modal','[data-testid="captcha-modal"]',
+    '[data-testid="verification-modal"]','[class~="captcha-modal"]',
+    '[class~="verification-modal"]','[id*="anti-bot"]','[class*="anti-bot"]',
+    '[id*="antibot"]','[class*="antibot"]','[role="dialog"]','[aria-modal="true"]'
+  ].join(',');
+  function getVisibleChallengeNodes() {
     if (!document.body) return [];
     const out=[];
-    for (const node of document.querySelectorAll(
-      '#captcha-modal, #verification-modal, [data-testid="captcha-modal"], '+
-      '[data-testid="verification-modal"], [class~="captcha-modal"], '+
-      '[class~="verification-modal"], [id^="captcha-"], [id^="verification-"]')) {
+    for (const node of document.querySelectorAll(verificationUiSelector)) {
       if (node.closest('#minibia-bot-panel') || node.closest('#server-message, #notification')) continue;
       if (node.closest('[hidden], [aria-hidden="true"]') || node.getClientRects?.().length===0) continue;
       const text=String(node.textContent||'').replace(/\s+/g,' ').trim();
-      if (!text || text.length>350 || !verificationActiveUiPattern.test(text)) continue;
+      if (!text || text.length>950 || !verificationActiveUiPattern.test(text)) continue;
+      // Require an identifiable verification dialog, not an incidental mention.
+      if (!/(?:verificaci[oó]n\s+anti[\s-]*bot|anti[\s-]*bot\s+(?:verification|check)|observa c[oó]mo se iluminan|repeat the order|repite el orden|captcha)/i.test(text)) continue;
+      if (out.some(parent=>parent.contains(node))) continue;
+      out.push(node);
+    }
+    return out;
+  }
+  function getVisibleChallengeDialogNotices(nodes=getVisibleChallengeNodes()) {
+    const out=[];
+    for (const node of nodes) {
+      const text=String(node.textContent||'').replace(/\s+/g,' ').trim();
       if (state.verificationDomSeen.get(node)===text) continue;
       state.verificationDomSeen.set(node,text);
       out.push({text:text.slice(0,160),source:'Ventana de verificación',channel:'Interfaz',sender:'Sistema',at:Date.now()});
     }
     return out;
+  }
+  // Count manual interactions with the challenge choices, not clicks on the
+  // postpone/close controls. Closing the dialog alone must never auto-resume.
+  function trackManualChallengeChoice(event) {
+    if (!state.pausedForVerification || !config.autoResumeAfterVerification) return;
+    const target=event?.target;
+    if (!target || !getVisibleChallengeNodes().some(n=>n.contains(target))) return;
+    const control=target.closest?.('button,[role="button"],a,input');
+    const desc=String(control?.textContent||control?.getAttribute?.('aria-label')||'').trim();
+    if (/aplazar|postpone|snooze|skip|cerrar|close|cancel|\b[x×]\b/i.test(desc)) return;
+    state.verificationUserSelections++;
+  }
+  document.addEventListener('pointerdown',trackManualChallengeChoice,true);
+  bot.addCleanup?.(()=>document.removeEventListener('pointerdown',trackManualChallengeChoice,true));
+
+  function attemptAutomaticVerificationResume(now,visibleNodes) {
+    if (!state.pausedForVerification || !config.autoResumeAfterVerification) return;
+    if (visibleNodes.length) {
+      state.verificationUiSeenAt ||= now;
+      state.verificationUiLastSeenAt=now;
+      state.verificationAutoResumeReason='CAPTCHA visible: esperando resolución manual';
+      return;
+    }
+    if (state.verificationFailureAt && state.verificationFailureAt >= state.verificationUiSeenAt) return;
+    const confirmedBySystem=state.verificationSuccessAt>0;
+    const completedUiManually=state.verificationUiSeenAt>0 &&
+      state.verificationUserSelections>=3 && state.verificationUiLastSeenAt>0 &&
+      now-state.verificationUiLastSeenAt>=5000 &&
+      now-state.verificationUiSeenAt<5*60*1000;
+    if (!confirmedBySystem && !completedUiManually) {
+      state.verificationAutoResumeReason=state.verificationUiSeenAt
+        ? 'Esperando fin del diálogo y secuencia manual válida'
+        : 'Esperando confirmación del sistema o diálogo de CAPTCHA';
+      return;
+    }
+    // A genuine completion event can clear a challenge without a UI ever
+    // appearing. A normal countdown is NOT a success acknowledgement.
+    if (confirmedBySystem && now-state.verificationSuccessAt<2000) return;
+    if (state.verificationUiLastSeenAt && now-state.verificationUiLastSeenAt<5000) return;
+    if (bot.emergencyState?.()?.halted || state.pausedForModeratorUntil>Date.now()) {
+      state.verificationAutoResumeReason='Otra protección activa; no se reanuda';
+      return;
+    }
+    state.verificationAutoResumeReason=confirmedBySystem
+      ? 'Verificación completada según el servidor'
+      : 'Secuencia manual completada y diálogo cerrado';
+    const why=state.verificationAutoResumeReason;
+    const result=resumeAfterVerification();
+    state.verificationAutoResumeReason=result.ok ? `Restaurado automáticamente: ${why}` : `Restauración parcial: ${result.reason}`;
+    if(result.ok)state.verificationAutoRestoredAt=now;
+    bot.log('verification automatic restore', {why,...result});
   }
 
   function scanVerificationNotice() {
@@ -1918,11 +2036,17 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
         bot.attack?.setMovementHold?.('verification',true);
         if (state.running) cancelOwnWaypointWalk();
       }
-      const notices=state.verificationPendingNotices.splice(0).concat(getVisibleChallengeDialogNotices());
+      const challengeNodes=getVisibleChallengeNodes();
+      const notices=state.verificationPendingNotices.splice(0).concat(getVisibleChallengeDialogNotices(challengeNodes));
       for (const notice of notices) {
         if (!state.pausedForVerification) {
           saveVerificationSnapshot();
           state.pausedForVerification=true;
+          state.verificationUiSeenAt=0;
+          state.verificationUiLastSeenAt=0;
+          state.verificationUserSelections=0;
+          state.verificationSuccessAt=0;
+          state.verificationFailureAt=0;
           cancelOwnWaypointWalk();
           bot.attack?.setMovementHold?.('verification',true);
           bot.safeNavigation?.cancel?.('attack');
@@ -1943,6 +2067,7 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
           bot.log('verification warning confirmed', {phase,source:notice.source,channel:notice.channel,sender:notice.sender});
         }
       }
+      attemptAutomaticVerificationResume(Date.now(),challengeNodes);
     } catch(error) { bot.log('verification notice check failed',error?.message||error); }
   }
 
@@ -2105,6 +2230,11 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     state.lastVerificationSender = null;
     state.verificationLastPhase = null;
     state.verificationAlarmedStages.clear();
+    state.verificationUiSeenAt=0;
+    state.verificationUiLastSeenAt=0;
+    state.verificationUserSelections=0;
+    state.verificationSuccessAt=0;
+    state.verificationFailureAt=0;
     state.lastPathAt = 0;
     state.needsRouteRejoinCheck = true;
     bot.attack?.setMovementHold?.('verification', false);
@@ -3132,6 +3262,14 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
       expectedFloor: state.expectedFloor,
       pausedForFloorMove: state.pausedForFloorMove,
       pausedForVerification: state.pausedForVerification && config.pauseWaypointsOnVerification,
+      verificationAutoResume: {
+        enabled:config.autoResumeAfterVerification,
+        uiDetected:state.verificationUiSeenAt>0,
+        selections:state.verificationUserSelections,
+        serverConfirmed:state.verificationSuccessAt>0,
+        reason:state.verificationAutoResumeReason,
+        restoredAt:state.verificationAutoRestoredAt
+      },
       lastVerificationNotice: state.lastVerificationNotice,
       lastVerificationSource: state.lastVerificationSource,
       lastVerificationChannel: state.lastVerificationChannel,
@@ -3176,6 +3314,7 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     config.travelFight = config.travelFight === true;
     config.useWaypointTools = config.useWaypointTools !== false;
     config.pauseWaypointsOnVerification = config.pauseWaypointsOnVerification === true;
+  config.autoResumeAfterVerification = config.autoResumeAfterVerification !== false;
     config.verificationScanTickMs = Math.max(200, Math.min(5000, Math.round(Number(config.verificationScanTickMs) || 500)));
     config.pauseOnModeratorMessage = config.pauseOnModeratorMessage === true;
     config.moderatorPauseMs = Math.max(20000, Math.min(120000, Number(config.moderatorPauseMs) || 30000));
