@@ -1616,6 +1616,101 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
       #minibia-bot-emergency-stop[data-mode='resume'] {background:#276042!important;}
       #minibia-bot-emergency-stop[data-mode='stop'] {background:#a62525!important;}
     `;
+    style.textContent += `
+      /* V24.1 - final sizing rules; override historic conflicting grids. */
+      #minibia-bot-panel .mb-quick-bar {gap:6px!important;}
+      #minibia-bot-panel .mb-quick-head {min-height:0!important;}
+      #minibia-bot-panel .mb-quick-routes {
+        display:flex!important;flex-flow:row wrap!important;align-items:flex-end!important;
+        justify-content:flex-start!important;gap:7px 12px!important;
+      }
+      #minibia-bot-panel .mb-quick-routes > .mb-quick-route {
+        display:flex!important;flex-direction:column!important;gap:2px!important;
+        width:clamp(210px, 29%, 360px)!important;max-width:360px!important;
+        min-width:min(100%,210px)!important;flex:0 1 360px!important;
+      }
+      #minibia-bot-panel .mb-quick-routes select {
+        display:block!important;width:100%!important;max-width:360px!important;
+        min-width:0!important;box-sizing:border-box!important;height:27px!important;
+      }
+      #minibia-bot-panel .mb-quick-core {gap:4px 11px!important;}
+      #minibia-bot-panel .mb-essential-heal {
+        display:flex!important;flex-flow:row wrap!important;align-items:center!important;
+        justify-content:flex-start!important;gap:5px 15px!important;margin:3px 0!important;
+      }
+      #minibia-bot-panel .mb-essential-heal label {
+        display:inline-flex!important;flex:0 0 auto!important;align-items:center!important;
+        white-space:nowrap!important;gap:5px!important;width:auto!important;
+      }
+      #minibia-bot-panel .mb-essential-heal input {
+        flex:0 0 76px!important;width:76px!important;min-width:0!important;
+        max-width:76px!important;height:26px!important;padding:4px 7px!important;
+      }
+      #minibia-bot-panel .mb-essential-ml {display:flex!important;flex-wrap:wrap!important;
+        gap:5px 12px!important;align-items:center!important;}
+      #minibia-bot-panel .mb-essential-ml .mb-quick-training {flex:0 1 auto!important;
+        width:auto!important;max-width:100%!important;margin:0!important;gap:6px!important;}
+      #minibia-bot-panel .mb-primary-safety {
+        display:grid!important;grid-template-columns:1fr!important;gap:5px!important;
+        border:1px solid rgba(212,172,88,.38)!important;border-radius:7px!important;
+        padding:7px 9px!important;margin:3px 0!important;min-width:0!important;
+        background:rgba(35,28,16,.32)!important;
+      }
+      #minibia-bot-panel .mb-primary-safety>.mb-label {font-size:12px!important;color:#f0d89f!important;}
+      #minibia-bot-panel .mb-primary-safety-checks,
+      #minibia-bot-panel .mb-primary-floor-checks {
+        display:flex!important;flex-flow:row wrap!important;gap:5px 13px!important;
+        align-items:center!important;justify-content:flex-start!important;
+      }
+      #minibia-bot-panel .mb-primary-safety .mb-toggle {display:inline-flex!important;
+        flex:0 0 auto!important;align-items:center!important;gap:4px!important;
+        white-space:normal!important;font-size:11px!important;line-height:1.4!important;
+      }
+      #minibia-bot-panel .mb-primary-safety .mb-toggle input[type=checkbox] {
+        appearance:auto!important;display:inline-block!important;flex:0 0 16px!important;
+        width:16px!important;height:16px!important;min-width:16px!important;
+        accent-color:#d4ac58!important;margin:0!important;
+      }
+      #minibia-bot-panel .mb-primary-floor {display:grid!important;grid-template-columns:1fr!important;
+        gap:5px!important;border-top:1px solid rgba(212,172,88,.24)!important;padding-top:6px!important;}
+      #minibia-bot-panel .mb-primary-floor>.mb-label {font-size:11px!important;}
+      #minibia-bot-panel .mb-primary-floor-controls {display:flex!important;flex-wrap:wrap!important;
+        align-items:end!important;gap:6px!important;}
+      #minibia-bot-panel .mb-primary-floor-controls>.mb-quick-route {
+        display:flex!important;flex-wrap:wrap!important;align-items:center!important;
+        gap:6px!important;flex:0 1 auto!important;font-size:11px!important;
+      }
+      #minibia-bot-panel .mb-primary-floor-controls input[type=text] {
+        width:min(260px, 100%)!important;max-width:260px!important;
+        min-width:120px!important;height:27px!important;padding:4px 7px!important;
+      }
+      #minibia-bot-panel .mb-primary-floor-controls button {width:auto!important;
+        min-width:0!important;padding:5px 10px!important;}
+      #minibia-bot-panel .mb-quick-cave-dock {margin:2px 0!important;padding:7px!important;}
+      #minibia-bot-panel .mb-cave-card {padding:6px 8px!important;gap:5px!important;}
+      #minibia-bot-panel .mb-main-cave-section>.mb-stack {
+        display:grid!important;grid-template-columns:repeat(auto-fit,minmax(min(100%,320px),1fr))!important;
+        align-items:start!important;align-content:start!important;gap:7px!important;
+      }
+      #minibia-bot-panel .mb-quick-cave-dock select {width:100%!important;min-width:0!important;max-width:100%!important;}
+      #minibia-bot-panel .mb-cave-card input[type=number] {max-width:100px!important;padding:4px 7px!important;}
+      #minibia-bot-panel .mb-cave-card .mb-actions button {width:auto!important;min-width:0!important;padding:5px 9px!important;}
+      #minibia-bot-panel .mb-quick-tools {
+        display:grid!important;grid-template-columns:repeat(auto-fit,minmax(min(100%,370px),1fr))!important;
+        column-count:initial!important;align-items:start!important;align-content:start!important;gap:7px!important;
+      }
+      #minibia-bot-panel .mb-quick-tools>.mb-quick-group {display:flex!important;
+        flex-direction:column!important;break-inside:auto!important;margin:0!important;
+        height:auto!important;min-height:0!important;align-self:start!important;}
+      #minibia-bot-panel .mb-quick-tools .mb-quick-category {margin-bottom:2px!important;}
+      #minibia-bot-panel #minibia-bot-quick-group-floor .mb-quick-route input {max-width:240px!important;}
+      #minibia-bot-panel .mb-quick-profiles select {max-width:240px!important;}
+      @container (max-width:510px) {
+        #minibia-bot-panel .mb-quick-routes>.mb-quick-route {width:100%!important;max-width:100%!important;flex:1 1 100%!important;}
+        #minibia-bot-panel .mb-primary-floor-controls>.mb-quick-route {width:100%!important;}
+        #minibia-bot-panel .mb-primary-floor-controls input {max-width:100%!important;}
+      }
+    `;
     document.head.appendChild(style);
 
     const panel = document.createElement("div");
@@ -2507,6 +2602,70 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     if(previousCaption)previousCaption.textContent='Activá lo necesario y presioná START HUNT';
     if(quickBar.querySelector('#minibia-bot-quick-resume-notice'))
       quickBar.querySelector('#minibia-bot-quick-resume-notice').textContent='REANUDAR TRAS CAPTCHA';
+    // V24.1: One visible control per action. Keep ALL original inputs mounted;
+    // reparent them instead of creating proxy toggles or duplicating listeners.
+    // The safety strip and Cave Bot always sit above diagnostics and API fields.
+    const safetyStrip = document.createElement('section');
+    safetyStrip.className = 'mb-primary-safety';
+    safetyStrip.setAttribute('aria-label', 'Alarmas, seguridad y objetos del piso');
+    safetyStrip.innerHTML = '<strong class="mb-label">SEGURIDAD Y ALARMAS · acceso directo</strong>' +
+      '<div class="mb-primary-safety-checks"></div>' +
+      '<div class="mb-primary-floor"><strong class="mb-label">OBJETOS DEL PISO Y PROTECCIÓN</strong><div class="mb-primary-floor-checks"></div><div class="mb-primary-floor-controls"></div></div>';
+    const safetyChecks = safetyStrip.querySelector('.mb-primary-safety-checks');
+    const floorChecks = safetyStrip.querySelector('.mb-primary-floor-checks');
+    const floorControls = safetyStrip.querySelector('.mb-primary-floor-controls');
+    // Alarm switches were under the large Gemini configuration. They must be
+    // visible before any long section regardless of window width.
+    const alarmRow = antiDetection?.querySelector(':scope > .mb-quick-settings');
+    if (alarmRow) safetyChecks.append(...Array.from(alarmRow.children));
+    // CAPTCHA recovery and holding on GM messages are independent of alarm sound.
+    // Make the real Cave checkboxes visible here, not hidden in a route card.
+    for (const id of [
+      'minibia-bot-cave-verification-pause',
+      'minibia-bot-cave-verification-auto-resume',
+      'minibia-bot-cave-moderator-pause'
+    ]) {
+      const input = panel.querySelector('#' + id);
+      const holder = input?.closest('label');
+      if (holder) safetyChecks.append(holder);
+    }
+    // Floor automation uses its original quick controls + existing callbacks.
+    const floorSwitchRow = floorQuick?.querySelector(':scope > .mb-quick-settings');
+    if (floorSwitchRow) floorChecks.append(...Array.from(floorSwitchRow.children));
+    const floorItems = quickBar.querySelector('#minibia-bot-quick-floor-items')?.closest('label');
+    if (floorItems) floorControls.append(floorItems);
+    const scanFloor = quickBar.querySelector('#minibia-bot-quick-floor-scan');
+    if (scanFloor) floorControls.append(scanFloor);
+    // There is one ML trainer at the top. Extra optional buffs remain simple
+    // checkboxes. Auto Eat is native in this environment: no second UI switch.
+    const suppliesRow = training?.querySelector(':scope > .mb-quick-settings');
+    for (const id of ['minibia-bot-quick-invisible', 'minibia-bot-quick-shield',
+                      'minibia-bot-quick-ring']) {
+      const holder = suppliesRow?.querySelector('#' + id)?.closest('label');
+      if (holder) floorChecks.append(holder);
+    }
+    if (training) wiringDock.append(training); // Includes obsolete Auto Eat UI & hotkey.
+    // The old floor card now holds only Xray and the floor scanner status;
+    // it remains below Cave Bot, without a second copy of its three toggles.
+    const floorHeading = floorQuick?.querySelector(':scope > .mb-quick-category');
+    if (floorHeading) floorHeading.textContent = 'XRAY · vista y estado de objetos';
+    const antiHeading = antiDetection?.querySelector(':scope > .mb-quick-category');
+    if (antiHeading) antiHeading.textContent = 'GEMINI · configuración y contactos';
+    const afterTraining = quickBar.querySelector('.mb-essential-ml') ||
+      quickBar.querySelector('.mb-essential-heal') || essentialsCore;
+    if (afterTraining) afterTraining.after(safetyStrip);
+    // Move the ONE real Cave Bot section above seller, Gemini and logs.
+    // No cloned controls, no additional dropdowns and no hidden waypoint editing.
+    if (caveDock.isConnected) safetyStrip.after(caveDock);
+    // START / STOP must be reachable before the large Cave editor.
+    // Move existing buttons (and their handlers), never create duplicates.
+    const topActions = quickBar.querySelector(':scope > .mb-quick-actions');
+    if (topActions && essentialsCore) essentialsCore.after(topActions);
+    const duplicatePreset = caveDock.querySelector('#minibia-bot-cave-preset-select')?.closest('.mb-field-grid');
+    if (duplicatePreset) wiringDock.append(duplicatePreset); // Hunt route selector already visible at top.
+    // Remove the old lone floor section if it is empty after reparenting.
+    // Do not remove original event targets; they remain in their existing DOM nodes.
+
     // Named Quick profiles: save the existing module configurations. Routes
     // remain Cave presets; never snapshot credentials or the current session.
     const quickProfilesKey='minibiaBot.ui.quickProfiles.v1';
