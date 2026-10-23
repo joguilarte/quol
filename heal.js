@@ -23,6 +23,8 @@ window.__minibiaBotBundle.installHealModule = function installHealModule(bot) {
       hpHotbarSlot: 1,
       minMana: 150,
       manaHotbarSlot: 2,
+      hpEnabled: true,
+      manaEnabled: true,
       enabled: false,
     },
     bot.storage.get(configStorageKey, {})
@@ -168,7 +170,7 @@ window.__minibiaBotBundle.installHealModule = function installHealModule(bot) {
   function canUseHpHeal(now = Date.now(), stats = readStats()) {
     const { hp } = stats;
     const slot = normalizeHotbarSlot(config.hpHotbarSlot);
-    if (!hp || !slot || state.pendingHpAttempt || !canUseHealSlot(slot, stats)) return false;
+    if (!config.hpEnabled || !hp || !slot || state.pendingHpAttempt || !canUseHealSlot(slot, stats)) return false;
 
     return (
       Number(config.minHp) > 0 &&
@@ -184,7 +186,7 @@ window.__minibiaBotBundle.installHealModule = function installHealModule(bot) {
   function canUseManaHeal(now = Date.now(), stats = readStats()) {
     const { mana } = stats;
     const slot = normalizeHotbarSlot(config.manaHotbarSlot);
-    if (!mana || !slot || state.pendingManaAttempt || state.pendingHpAttempt ||
+    if (!config.manaEnabled || !mana || !slot || state.pendingManaAttempt || state.pendingHpAttempt ||
         !canUseHealSlot(slot, stats)) return false;
 
     return (
@@ -352,6 +354,8 @@ window.__minibiaBotBundle.installHealModule = function installHealModule(bot) {
     }
 
     Object.assign(config, nextConfig);
+    config.hpEnabled = config.hpEnabled !== false;
+    config.manaEnabled = config.manaEnabled !== false;
     persistConfig();
     bot.log("auto heal config updated", { ...config });
     return { ...config };

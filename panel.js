@@ -221,7 +221,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     const autoHealToggle = document.getElementById("minibia-bot-auto-heal-enabled");
     if (!autoHealToggle) return;
 
-    autoHealToggle.checked = !!bot.heal?.status?.().running;
+    autoHealToggle.checked = !!bot.heal?.status?.().running && bot.heal?.config?.hpEnabled!==false;
   }
 
   function refreshAutoInvisibleStatus() {
@@ -2107,7 +2107,8 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
       <div class="mb-quick-core mb-quick-settings">
         <label class="mb-toggle"><input id="minibia-bot-quick-attack" type="checkbox"/><span>Auto Attack</span></label>
         <label class="mb-toggle"><input id="minibia-bot-quick-melee" type="checkbox"/><span>Melee</span></label>
-        <label class="mb-toggle"><input id="minibia-bot-quick-heal" type="checkbox"/><span>Auto Heal</span></label>
+        <label class="mb-toggle"><input id="minibia-bot-quick-heal" type="checkbox"/><span>Auto Heal (HP)</span></label>
+        <label class="mb-toggle"><input id="minibia-bot-quick-auto-mana" type="checkbox"/><span>Auto Mana</span></label>
         <label class="mb-toggle"><input id="minibia-bot-quick-talk" type="checkbox"/><span>Gemini · Default / GM</span></label>
         <label class="mb-toggle"><input id="minibia-bot-quick-private" type="checkbox"/><span>Responder privados</span></label>
         <label class="mb-toggle"><input id="minibia-bot-quick-npc" type="checkbox"/><span>Responder NPC</span></label>
@@ -2181,7 +2182,6 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
             <label class="mb-field" style="flex:2 1 155px"><span class="mb-field-label">Spell</span><input id="minibia-bot-quick-ml-spell" type="text" placeholder="exura" /></label>
             <label class="mb-field" style="flex:1 1 95px"><span class="mb-field-label">Min (s)</span><input id="minibia-bot-quick-ml-min" type="number" min="1" max="3600" step="0.5" /></label>
             <label class="mb-field" style="flex:1 1 95px"><span class="mb-field-label">Max (s)</span><input id="minibia-bot-quick-ml-max" type="number" min="1" max="3600" step="0.5" /></label>
-            <label class="mb-field" style="flex:1 1 80px"><span class="mb-field-label">Mana</span><input id="minibia-bot-quick-ml-mana" type="number" min="0" step="1" /></label>
           </div>
           <div class="mb-quick-settings">
             <label class="mb-toggle"><input id="minibia-bot-quick-eat" type="checkbox"/><span>Auto Eat</span></label>
@@ -2219,6 +2219,50 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
       </div>
       <div class="mb-small-note" id="minibia-bot-quick-status">Listo para iniciar la caza.</div>`;
     panel.querySelector(".mb-body")?.prepend(quickBar);
+    // Native hover help: visible quick inputs + existing options. No new panels.
+    const quickHelp = {
+      'heal':'Activa únicamente la recuperación automática de HP. Auto Mana se controla por separado.',
+      'auto-mana':'Activa o desactiva el uso de la hotkey de maná cuando el maná alcanza el límite indicado. No altera Auto Heal (HP).',
+      'talk':'Activa el respondedor Gemini para Default y GM. Necesita API key válida, acceso a la API y mensajes elegibles.',
+      'private':'Permite responder mensajes privados. Requiere Gemini activo.',
+      'npc':'Permite responder NPC. Requiere Gemini activo.',
+      'smart-chat':'Alarma sonora para nuevos mensajes Default o privados. Funciona incluso con Gemini apagado.',
+      'unknown-alarm':'Alarma sonora al detectar jugadores desconocidos. Puede funcionar junto con Chat alarm.',
+      'gemini-alarm':'Alarma cuando falla una petición a Gemini. No reemplaza Chat alarm.',
+      'moderator':'Detecta mensajes de moderadores según las reglas configuradas; puede pausar la ruta.',
+      'verification':'Detiene movimiento ante verificación/CAPTCHA. No resuelve el desafío.',
+      'panic-unknown':'Respuesta de emergencia ante jugadores desconocidos; no es sólo una alarma sonora.',
+      'panic-health':'Respuesta de emergencia por pérdida de vida según configuración.',
+      'panic-return':'Intenta volver al punto original cuando el riesgo terminó y la ruta lo permite.',
+      'floor-enabled':'Mueve objetos seleccionados del piso, no los recoge del cadáver.',
+      'floor-rares':'Incluye raros del catálogo cargado de Minibia.',
+      'floor-walk':'Permite acercarse a los objetos que debe mover.',
+      'ml-enabled':'Lanza el hechizo indicado cada intervalo aleatorio Min–Max. El estado debajo explica bloqueos.',
+      'ml-spell':'Palabras exactas del hechizo que Minibia debe lanzar, por ejemplo: utani hur.',
+      'ml-min':'Tiempo mínimo, en segundos, entre lanzamientos correctamente enviados.',
+      'ml-max':'Tiempo máximo, en segundos, entre lanzamientos correctamente enviados.',
+      'heal-hp':'Umbral: utilizar hotkey de HP cuando la vida esté en este valor o por debajo.',
+      'heal-hp-key':'Número del slot de hotbar para recuperar HP (1–12).',
+      'heal-mana':'Umbral: utilizar hotkey de maná cuando el maná esté en este valor o por debajo.',
+      'heal-mana-key':'Número del slot de hotbar para recuperar maná (1–12).',
+      'attack':'Activa la selección y el ataque automático de criaturas.',
+      'seller-enabled':'Activa el ciclo de caza y venta en Shanar.',
+      'stairs':'Evita cambios de piso accidentales durante persecución.',
+      'random':'Varía movimientos entre los waypoints permitidos.',
+      'route':'Ruta de caza grabada que utiliza START HUNT.',
+      'seller-route':'Ruta grabada que conecta Shanar con la hunt.'
+    };
+    for(const [name,help] of Object.entries(quickHelp)){
+      const element=quickBar.querySelector('#minibia-bot-quick-'+name);
+      if(element){element.title=help;const label=element.closest('label');if(label)label.title=help;}
+    }
+    for(const [id,help] of [
+      ['minibia-bot-quick-start','Inicia la caza según la ruta seleccionada. Si no hay waypoint alcanzable, informa el error.'],
+      ['minibia-bot-quick-stop','Detiene Cave Bot y Auto Attack sin modificar otras utilidades.'],
+      ['minibia-bot-quick-alarm','Prueba el sonido de alarmas desde este navegador.'],
+      ['minibia-bot-quick-resume-notice','Recuperación manual de respaldo tras resolver un CAPTCHA.']]){
+      const element=quickBar.querySelector('#'+id);if(element)element.title=help;
+    }
     // Keep ALL quick inputs in the DOM with unchanged IDs. No duplicate state or listeners.
     // Convert the previous six nested disclosure panels into always-visible compact rows.
     for (const group of Array.from(quickBar.querySelectorAll('.mb-quick-group'))) {
@@ -2392,6 +2436,11 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
       const mlTitle=document.createElement('strong');
       mlTitle.textContent='ML Trainer';
       mlEssentials.append(mlTitle, mlRow);
+      const spellState=document.createElement('span');
+      spellState.id='minibia-bot-ml-runtime-status';
+      spellState.setAttribute('aria-live','polite');
+      spellState.style.cssText='font-size:11px;color:#d6c18f;white-space:normal';
+      mlEssentials.append(spellState);
       (healFields || essentialsCore).after(mlEssentials);
       const remainingTraining=quickBar.querySelector('#minibia-bot-quick-group-training > summary');
       if (remainingTraining) remainingTraining.firstChild.textContent='Supplies ';
@@ -2883,6 +2932,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
       routeMode:quickBar.querySelector('#minibia-bot-quick-route-mode'),
       leash:quickBar.querySelector('#minibia-bot-quick-leash'),
       heal:quickBar.querySelector('#minibia-bot-quick-heal'),
+      autoMana:quickBar.querySelector('#minibia-bot-quick-auto-mana'),
       talk:quickBar.querySelector('#minibia-bot-quick-talk'),
       geminiAlarm:quickBar.querySelector('#minibia-bot-quick-gemini-alarm'),
       smartChat:quickBar.querySelector('#minibia-bot-quick-smart-chat'),
@@ -2909,7 +2959,6 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     const quickMlSpell=quickBar.querySelector('#minibia-bot-quick-ml-spell');
     const quickMlMin=quickBar.querySelector('#minibia-bot-quick-ml-min');
     const quickMlMax=quickBar.querySelector('#minibia-bot-quick-ml-max');
-    const quickMlMana=quickBar.querySelector('#minibia-bot-quick-ml-mana');
     function refreshQuickSummary() {
       const a=bot.attack?.status?.(),c=bot.cave?.status?.(),h=bot.heal?.status?.(),t=bot.talk?.status?.();
       const r=bot.rune?.status?.();
@@ -2918,7 +2967,6 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
       if(document.activeElement!==quickMlSpell) quickMlSpell.value=runeConfig.runeSpellWords||'';
       if(document.activeElement!==quickMlMin) quickMlMin.value=String((runeConfig.runeCooldownMinMs??runeConfig.runeCooldownMs??3500)/1000);
       if(document.activeElement!==quickMlMax) quickMlMax.value=String((runeConfig.runeCooldownMaxMs??runeConfig.runeCooldownMs??3500)/1000);
-      if(document.activeElement!==quickMlMana) quickMlMana.value=String(runeConfig.runeManaCost??0);
       const attackConfig=a?.config||{},caveConfig=c?.config||{};
       quickControls.attack.checked=!!a?.running;
       quickControls.melee.checked=attackConfig.meleeMode===true;
@@ -2930,7 +2978,8 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
       quickControls.random.checked=caveConfig.randomizeMovement===true;
       quickControls.routeMode.value=caveConfig.routeTraversalMode||"pingpong";
       quickControls.leash.checked=caveConfig.limitChaseToRoute===true;
-      quickControls.heal.checked=!!h?.running;
+      quickControls.heal.checked=!!h?.running && h?.config?.hpEnabled!==false;
+      quickControls.autoMana.checked=!!h?.running && h?.config?.manaEnabled!==false;
       quickControls.talk.checked=!!t?.running && t?.config?.replyMode==='gemini';
       quickControls.geminiAlarm.checked=t?.config?.alarmOnGeminiFailure===true;
       quickControls.smartChat.checked=bot.panic?.config?.smartChatAlertEnabled===true;
@@ -2993,7 +3042,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
       mirror('minibia-bot-panic-unknown-alarm',bot.panic?.config?.unknownPlayerSoundAlertEnabled===true);
       mirror('minibia-bot-panic-smart-chat',bot.panic?.config?.smartChatAlertEnabled===true);
       mirror('minibia-bot-cave-limit-chase',caveConfig.limitChaseToRoute===true);
-      mirror('minibia-bot-auto-heal-enabled',!!h?.running);
+      mirror('minibia-bot-auto-heal-enabled',!!h?.running && h?.config?.hpEnabled!==false);
       mirror('minibia-bot-talk-enabled',!!t?.running);
       mirror('minibia-bot-talk-mode',t?.config?.replyMode||'rules');
       mirror('minibia-bot-talk-gemini-alarm',t?.config?.alarmOnGeminiFailure===true);
@@ -3187,11 +3236,24 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     quickControl('verification',(on)=>bot.cave.updateConfig({pauseWaypointsOnVerification:on}));
     quickControl('travelFight',(on)=>bot.cave.updateConfig({travelFight:on}));
     quickControl('leash',(on)=>bot.cave.updateConfig({limitChaseToRoute:on}));
-    quickControl('heal',(on)=>on?bot.heal.start():bot.heal.stop());
+    // Independent HP/Mana switches share ONE heal timer, and retain their own
+    // persisted configuration. Disabling HP never silently disables Mana.
+    function setHealChannel(channel,on) {
+      const key=channel==='hp'?'hpEnabled':'manaEnabled';
+      bot.heal?.updateConfig?.({[key]:on});
+      const h=bot.heal?.status?.();
+      if(on && !h?.running) bot.heal?.start?.();
+      else if(!on && h?.running && h.config.hpEnabled===false && h.config.manaEnabled===false)
+        bot.heal?.stop?.();
+      refreshAutoHealStatus();
+    }
+    quickControl('heal',(on)=>setHealChannel('hp',on));
+    quickControl('autoMana',(on)=>setHealChannel('mana',on));
     quickControl('chase',(value)=>bot.attack.updateConfig({chaseController:value}));
     quickControl('geminiAlarm',(on)=>bot.talk.updateConfig({alarmOnGeminiFailure:on}));
     quickControl('smartChat',(on)=>{
-      bot.panic.updateConfig({smartChatAlertEnabled:on, ...(on?{unknownPlayerSoundAlertEnabled:false}:{})});
+      // Chat and nearby-player alarms are independent, not mutually exclusive.
+      bot.panic.updateConfig({smartChatAlertEnabled:on});
       refreshPanicStatus();
     });
     // Hub and Advanced controls share the same real modules and storage. No independent presets.
@@ -3213,8 +3275,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     quickExtra('allow-floors',value=>bot.cave?.updateConfig?.({allowFloorTransitions:value}));
     quickExtra('tools-floor',value=>bot.cave?.updateConfig?.({useWaypointTools:value}));
     quickExtra('unknown-alarm',value=>{
-      bot.panic?.updateConfig?.({unknownPlayerSoundAlertEnabled:value,
-        ...(value?{smartChatAlertEnabled:false}:{})});
+      bot.panic?.updateConfig?.({unknownPlayerSoundAlertEnabled:value});
       refreshPanicStatus();
     });
     quickExtra('panic-unknown',value=>bot.panic?.updateConfig?.({unknownPlayerEnabled:value}));
@@ -3322,20 +3383,47 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
       let min=parseSeconds(quickMlMin,previousMin);
       let max=parseSeconds(quickMlMax,previousMax);
       if(min>max) {if(changedField==='max') min=max; else max=min;}
-      const runeManaCost=Math.max(0,Math.floor(Number(quickMlMana.value)||0));
-      bot.rune?.updateConfig?.({runeSpellWords,runeCooldownMinMs:Math.round(min*1000),runeCooldownMaxMs:Math.round(max*1000),runeManaCost});
+      // Mana threshold is not a required ML trainer input. The server decides
+      // whether the character has enough mana for its actual spell cost.
+      bot.rune?.updateConfig?.({runeSpellWords,runeCooldownMinMs:Math.round(min*1000),runeCooldownMaxMs:Math.round(max*1000),runeManaCost:0});
       refreshQuickSummary();
     }
     quickMlSpell.addEventListener('change',()=>quickMlSave());
     quickMlMin.addEventListener('change',()=>quickMlSave('min'));
     quickMlMax.addEventListener('change',()=>quickMlSave('max'));
-    quickMlMana.addEventListener('change',()=>quickMlSave());
+    const mlStatus=quickBar.querySelector('#minibia-bot-ml-runtime-status');
+    // Legacy mana thresholds (e.g. 600 for rune-making) would block an
+    // ordinary ML-training spell. Do not carry that threshold into ML mode.
+    if(bot.rune?.config?.runeManaCost) bot.rune.updateConfig({runeManaCost:0});
+    function refreshMlStatus() {
+      if(!mlStatus)return;
+      const r=bot.rune?.status?.();
+      const g=r?.gates||{};
+      const send=window.gameClient?.interface?.channelManager?.sendMessageText;
+      let text='Apagado';
+      if(r?.running){
+        if(typeof send!=='function')text='Activo · canal de chat no disponible';
+        else if(!String(r.config?.runeSpellWords||'').trim())text='Activo · falta indicar el hechizo';
+        else if(!g.hasStats)text='Activo · esperando estadísticas HP/maná';
+        else if(!g.enoughHp)text='Activo · esperando HP seguro';
+        else if(!g.enoughMana)text='Activo · esperando maná suficiente';
+        else if(!g.enoughFood)text='Activo · esperando comida';
+        else if(!g.cooldownReady)text='Activo · próximo intento en '+Math.ceil((g.cooldownRemainingMs||0)/1000)+' s';
+        else text='Activo · listo para lanzar';
+      }
+      mlStatus.textContent=text;
+      mlStatus.title='Muestra por qué el hechizo todavía no fue enviado. El lanzamiento efectivo depende también de Minibia.';
+    }
     quickMlEnabled.addEventListener('change',()=>{
-      const desiredRunning=quickMlEnabled.checked; // Save refreshes UI, so preserve the user's click.
+      const desiredRunning=quickMlEnabled.checked;
       quickMlSave();
-      if(desiredRunning) bot.rune?.start?.(); else bot.rune?.stop?.();
-      refreshRuneStatus();refreshQuickSummary();
+      if(desiredRunning && !bot.rune?.status?.()?.running) bot.rune?.start?.();
+      else if(!desiredRunning) bot.rune?.stop?.();
+      refreshRuneStatus();refreshQuickSummary();refreshMlStatus();
     });
+    const mlStatusTimer=window.setInterval(refreshMlStatus,1000);
+    bot.addCleanup(()=>window.clearInterval(mlStatusTimer));
+    refreshMlStatus();
     quickControl('talk',(on)=>{
       if(on){bot.talk.updateConfig({replyMode:'gemini'});if(!bot.talk.status().running) {
         if(!bot.talk.start()) quickStatus.textContent='Gemini could not start; check API key in Talk';
@@ -3666,7 +3754,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
       runeEnabledInput.checked = !!bot.rune?.status?.().running;
       runeEnabledInput.addEventListener("change", () => {
         const runeSpellWords = spellInput?.value?.trim() || bot.rune.config.runeSpellWords;
-        const runeManaCost = Math.max(0, Number(manaInput?.value) || bot.rune.config.runeManaCost || 0);
+        const runeManaCost = 0; // ML trainer: no additional user-defined threshold.
 
         if (runeEnabledInput.checked) {
           bot.rune.start({ runeSpellWords, runeManaCost });
@@ -4148,7 +4236,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     }
 
     if (autoHealEnabledInput) {
-      autoHealEnabledInput.checked = !!bot.heal?.status?.().running;
+      autoHealEnabledInput.checked = !!bot.heal?.status?.().running && bot.heal?.config?.hpEnabled!==false;
       autoHealEnabledInput.addEventListener("change", () => {
         const minHp = Math.max(0, Number(autoHealMinHpInput?.value) || bot.heal.config.minHp || 0);
         const hpHotbarSlot = Math.min(
@@ -4161,12 +4249,8 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
           Math.max(1, Number(autoHealManaHotkeyInput?.value) || bot.heal.config.manaHotbarSlot || 1)
         );
 
-        if (autoHealEnabledInput.checked) {
-          bot.heal.start({ minHp, hpHotbarSlot, minMana, manaHotbarSlot });
-        } else {
-          bot.heal.stop();
-        }
-
+        bot.heal.updateConfig({ minHp, hpHotbarSlot, minMana, manaHotbarSlot });
+        setHealChannel('hp', autoHealEnabledInput.checked);
         refreshAutoHealStatus();
       });
     }
@@ -4417,8 +4501,7 @@ window.__minibiaBotBundle.installPanel = function installPanel(bot) {
     if (panicSmartChatInput) {
       panicSmartChatInput.checked = !!bot.panic?.status?.().config?.smartChatAlertEnabled;
       panicSmartChatInput.addEventListener('change', () => {
-        bot.panic.updateConfig({smartChatAlertEnabled:panicSmartChatInput.checked,
-          ...(panicSmartChatInput.checked?{unknownPlayerSoundAlertEnabled:false}:{})});
+        bot.panic.updateConfig({smartChatAlertEnabled:panicSmartChatInput.checked});
         refreshPanicStatus(); refreshQuickSummary();
       });
     }
