@@ -1968,8 +1968,10 @@ window.__minibiaBotBundle.installPanicModule = function installPanicModule(bot) 
   }
 
   function smartChatSignature(message) {
+    // Rendering/locale updates can change a row's time without adding a new chat line.
+    // Ignore mutable display timestamps to avoid false repeated chat alarms.
     return [message.channelName, message.privateMessage ? 'pm' : 'public',
-      message.sender, message.body, message.time || ''].map(foldChatText).join('|');
+      message.sender, message.body].map(foldChatText).join('|');
   }
 
   function resetSmartChatScan() {
@@ -4516,7 +4518,10 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     pausedForModeratorUntil: 0,
     moderatorLastSender: null,
     moderatorSeen: new Set(),
-    moderatorPresenceSeen: new Set(),
+    moderatorPresenceSeen: new Map(), // Stable name -> last observed time; tolerates world-list flicker.
+    moderatorLastAlertBySender: new Map(), // One alert per GM incident, never every scan.
+    moderatorLastAlertAt: 0,
+    moderatorLastAlertSource: null,
     moderatorScannerTimerId: null,
   };
   const minimapOverlayState = {
@@ -6539,21 +6544,22 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     return !!prefix && isModeratorSender(prefix);
   }
 
+  // A chat row may shift index or receive a new __time during client redraw.
+  // Neither property identifies a NEW message. The immutable visible content does.
   function moderatorChatSnapshot() {
     const out = [];
     for (const channel of window.gameClient?.interface?.channelManager?.channels || []) {
       const entries = channel?.__contents || [];
       for (let i = Math.max(0, entries.length - 20); i < entries.length; i++) {
         const entry = entries[i] || {};
-        const raw = String(entry.message || entry.text || "");
-        let sender = String(entry.author || entry.sender || entry.name || "").trim();
-        // Some client versions keep the complete "Name [GOD] says" line.
-        const prefixSender = String(raw.match(/^(?:\d{1,2}:\d{2}\s+)?(.{1,80}?)\s+says:\s+/i)?.[1] || "").trim();
+        const raw = String(entry.message || entry.text || '');
+        let sender = String(entry.author || entry.sender || entry.name || '').trim();
+        const prefixSender = String(raw.match(/^(?:\d{1,2}:\d{2}\s+)?(.{1,80}?)\s+says:\s+/i)?.[1] || '').trim();
         if (!sender || (prefixSender && moderatorRolePattern.test(prefixSender))) sender = prefixSender;
-        const role = String(entry.role || entry.rank || entry.senderRole || "");
+        const role = String(entry.role || entry.rank || entry.senderRole || '');
         if (!sender && !role) continue;
-        const stamp = String(entry.__time || entry.time || entry.id || "");
-        const key = `${channel?.name || ""}|${stamp}|${i}|${sender}|${raw}`;
+        const key = [channel?.name || '', sender, role, raw]
+          .map((value) => String(value).trim().toLowerCase()).join('|');
         out.push({ key, sender, role });
       }
     }
@@ -6564,56 +6570,71 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
     state.moderatorSeen = new Set(moderatorChatSnapshot().map((msg) => msg.key));
   }
 
+  // Do not alarm repeatedly for the same person because the chat is refreshed,
+  // visibility flickers, or the GM sends multiple lines during the incident.
+  const moderatorIncidentCooldownMs = 120000;
+  const moderatorPresenceGraceMs = 60000;
   function pauseForModerator(sender, source = 'chat') {
     if (!(state.running || bot.attack?.status?.()?.running)) return false;
-    const now=Date.now();
-    const alreadyPaused=now < state.pausedForModeratorUntil;
-    state.pausedForModeratorUntil=now+config.moderatorPauseMs;
-    state.moderatorLastSender=sender;
-    if (!alreadyPaused) {
-      cancelOwnWaypointWalk();
-      bot.attack?.setMovementHold?.('moderator', true);
-      bot.safeNavigation?.cancel?.('attack');
-      bot.reportAlarm?.('gm-'+source, `Posible moderador: ${sender}`,
-        `Movimiento en pausa ${Math.ceil(config.moderatorPauseMs/1000)} s; ataque estacionario`,
-        {source: source==='presence'?'Entidad reconocida cerca':'Mensaje de chat',
-          channel:source==='presence'?'mundo':'chat',sender});
-      bot.log('cave paused after moderator signal', {sender,source,seconds:config.moderatorPauseMs/1000});
-    }
+    const now = Date.now();
+    const identity = String(sender || '').trim().toLowerCase().replace(/\s+/g, ' ');
+    if (!identity) return false;
+    const last = state.moderatorLastAlertBySender.get(identity) || 0;
+    if ((last && now - last < moderatorIncidentCooldownMs) || now < state.pausedForModeratorUntil)
+      return false;
+    state.moderatorLastAlertBySender.set(identity, now);
+    // Bound memory usage on long-running sessions.
+    for (const [name, at] of state.moderatorLastAlertBySender)
+      if (now - at > moderatorIncidentCooldownMs * 4) state.moderatorLastAlertBySender.delete(name);
+    state.pausedForModeratorUntil = now + config.moderatorPauseMs;
+    state.moderatorLastSender = sender;
+    state.moderatorLastAlertAt = now;
+    state.moderatorLastAlertSource = source;
+    cancelOwnWaypointWalk();
+    bot.attack?.setMovementHold?.('moderator', true);
+    bot.safeNavigation?.cancel?.('attack');
+    bot.reportAlarm?.('gm-'+source, `Posible moderador: ${sender}`,
+      `Movimiento en pausa ${Math.ceil(config.moderatorPauseMs/1000)} s; ataque estacionario`,
+      {source: source==='presence'?'Entidad reconocida cerca':'Mensaje de chat',
+        channel:source==='presence'?'mundo':'chat',sender});
+    bot.log('cave paused after moderator signal', {sender,source,seconds:config.moderatorPauseMs/1000});
     return true;
   }
 
   function scanModeratorPresence() {
-    const me=normalizePosition(bot.getPlayerPosition?.());
+    const me = normalizePosition(bot.getPlayerPosition?.());
     if (!me) return;
-    const playerType=window.CONST?.TYPES?.PLAYER ?? 0;
-    const npcType=window.CONST?.TYPES?.NPC ?? 2;
-    const current=new Set();
+    const now = Date.now();
+    const playerType = window.CONST?.TYPES?.PLAYER ?? 0;
+    const npcType = window.CONST?.TYPES?.NPC ?? 2;
     for (const creature of Object.values(window.gameClient?.world?.activeCreatures || {})) {
       if (!creature || (creature.type!==playerType && creature.type!==npcType)) continue;
-      const position=normalizePosition(creature.getPosition?.() || creature.__position);
+      const position = normalizePosition(creature.getPosition?.() || creature.__position);
       if (!position || position.z!==me.z ||
           Math.max(Math.abs(position.x-me.x),Math.abs(position.y-me.y))>8) continue;
-      const name=String(creature.name||'').trim();
+      const name = String(creature.name||'').trim();
       if (!isModeratorSender(name, creature.role||creature.rank||'')) continue;
-      const key=`${creature.id ?? creature.__id ?? name}|${name.toLowerCase()}`;
-      current.add(key);
-      if (!state.moderatorPresenceSeen.has(key)) pauseForModerator(name,'presence');
+      // Creature IDs may be recycled when the world list is refreshed.
+      const identity = name.toLowerCase().replace(/\s+/g, ' ');
+      const lastSeen = state.moderatorPresenceSeen.get(identity);
+      if (lastSeen == null || now - lastSeen > moderatorPresenceGraceMs)
+        pauseForModerator(name,'presence');
+      state.moderatorPresenceSeen.set(identity,now);
     }
-    // Re-arm only after the entity has left the observable area.
-    state.moderatorPresenceSeen=current;
+    for (const [name, lastSeen] of state.moderatorPresenceSeen)
+      if (now - lastSeen > moderatorPresenceGraceMs * 2) state.moderatorPresenceSeen.delete(name);
   }
 
   function scanModeratorChat() {
     if (!config.pauseOnModeratorMessage) return;
     try {
       scanModeratorPresence();
-      const messages=moderatorChatSnapshot();
+      const messages = moderatorChatSnapshot();
       for (const msg of messages) {
         if (state.moderatorSeen.has(msg.key)) continue;
         state.moderatorSeen.add(msg.key);
-        if (state.moderatorSeen.size>400)
-          state.moderatorSeen=new Set(Array.from(state.moderatorSeen).slice(-250));
+        if (state.moderatorSeen.size>800)
+          state.moderatorSeen=new Set(Array.from(state.moderatorSeen).slice(-500));
         if (!isModeratorSender(msg.sender,msg.role)) continue;
         pauseForModerator(msg.sender,'chat');
       }
@@ -6626,8 +6647,8 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
   function restartModeratorScanner() {
     if (state.moderatorScannerTimerId != null) window.clearInterval(state.moderatorScannerTimerId);
     state.moderatorScannerTimerId = null;
-    resetModeratorScanBaseline(); // Do not trigger on old chat history.
-    state.moderatorPresenceSeen=new Set();
+    resetModeratorScanBaseline(); // Pre-existing messages are NOT new events.
+    // Preserve per-sender suppression across config updates/restarts.
     if (config.pauseOnModeratorMessage) {
       state.moderatorScannerTimerId = window.setInterval(scanModeratorChat, 500);
     }
@@ -7690,6 +7711,8 @@ window.__minibiaBotBundle.installCaveModule = function installCaveModule(bot) {
       moderatorPaused: Date.now() < state.pausedForModeratorUntil,
       moderatorPauseRemainingMs: Math.max(0, state.pausedForModeratorUntil - Date.now()),
       moderatorLastSender: state.moderatorLastSender,
+      moderatorLastAlertAt: state.moderatorLastAlertAt,
+      moderatorLastAlertSource: state.moderatorLastAlertSource,
       direction: state.direction,
       currentWaypoint: cloneValue(waypoint),
       distanceToWaypoint: getDistanceToWaypoint(position, waypoint),
